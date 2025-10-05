@@ -1,0 +1,61 @@
+{
+  "name": "plumtrips-invoicing-backend",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "clean": "rimraf dist || rm -rf dist",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "postinstall": "prisma generate",
+    "prisma": "prisma",
+    "migrate": "prisma migrate dev",
+    "generate": "prisma generate"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.600.0",
+    "@aws-sdk/client-ses": "^3.600.0",
+    "@aws-sdk/s3-request-presigner": "^3.884.0",
+    "@prisma/client": "^5.18.0",
+    "axios": "^1.7.2",
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "date-fns": "^3.6.0",
+    "dayjs": "^1.11.18",
+    "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
+    "express": "^4.19.2",
+    "helmet": "^7.1.0",
+    "joi": "^17.13.3",
+    "jsonwebtoken": "^9.0.2",
+    "jwks-rsa": "^3.1.0",
+    "mongodb": "^6.20.0",
+    "multer": "^2.0.2",
+    "pdf-lib": "^1.17.1",
+    "pdfkit": "^0.17.2",
+    "pdfmake": "^0.2.10",
+    "qrcode": "^1.5.4",
+    "react-router-dom": "^7.8.2",
+    "xlsx": "^0.18.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^3.0.0",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/multer": "^2.0.0",
+    "@types/node": "^24.3.1",
+    "@types/pdfkit": "^0.17.3",
+    "@types/pdfmake": "^0.2.11",
+    "@types/qrcode": "^1.5.5",
+    "@types/xlsx": "^0.0.36",
+    "prisma": "^5.18.0",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.4",
+    "rimraf": "^5.0.10"
+  }
+}
