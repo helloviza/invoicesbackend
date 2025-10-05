@@ -1,0 +1,53 @@
+Project tree for: D:\plumtrips-invoicing\apps\frontend
+(Date: 2025-10-01 03:23:45)
+
++-- frontend\
++-- public\
+|   \-- assets\
+|       \-- logo.png
++-- src\
+|   +-- api\
+|   |   +-- client.ts
+|   |   \-- contract.ts
+|   +-- components\
+|   |   +-- BillToCreateDialog.tsx
+|   |   +-- BillToSelect.tsx
+|   |   +-- ErrorBoundary.tsx
+|   |   +-- Header.tsx
+|   |   +-- InvoiceForm.tsx
+|   |   +-- RequireAuth.tsx
+|   |   \-- ServiceTypeFields.tsx
+|   +-- lib\
+|   |   +-- api.ts
+|   |   +-- invoices.ts
+|   |   \-- serviceTypes.ts
+|   +-- pages\
+|   |   +-- admin\
+|   |   |   \-- AccessPage.tsx
+|   |   +-- billto\
+|   |   |   \-- BillToPage.tsx
+|   |   +-- dashboard\
+|   |   |   \-- DashboardPage.tsx
+|   |   +-- history\
+|   |   |   \-- HistoryPage.tsx
+|   |   +-- import\
+|   |   |   \-- ImportPage.tsx
+|   |   +-- invoice\
+|   |   |   \-- NewInvoicePage.tsx
+|   |   +-- invoices\
+|   |   |   +-- TotalsPreview.tsx
+|   |   |   \-- transformForSubmit.ts
+|   |   +-- InvoicePage.tsx
+|   |   \-- LoginPage.tsx
+|   +-- App.tsx
+|   +-- main.tsx
+|   +-- theme.ts
+|   \-- vite-env.d.ts
++-- .env.example
++-- .gitignore
++-- index.html
++-- package.json
++-- pnpm-lock.yaml
++-- README.md
++-- tsconfig.json
+\-- vite.config.ts
