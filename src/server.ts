@@ -1,4 +1,4 @@
-// apps/backend/src/server.ts
+﻿// apps/backend/src/server.ts
 import 'dotenv/config';
 import express, { type Request, type Response, type NextFunction } from 'express';
 import cors, { type CorsOptions } from 'cors';
@@ -129,7 +129,7 @@ app.use((req: Request, res: Response) => {
 // Error handler
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   const message = err instanceof Error ? err.message : 'Internal Server Error';
-  if (NODE_ENV !== 'test') console.error('🔥 Unhandled error:', err);
+  if (NODE_ENV !== 'test') console.error('ðŸ”¥ Unhandled error:', err);
   res
     .status(500)
     .json({ ok: false, message, ...(NODE_ENV === 'development' ? { stack: (err as any)?.stack } : {}) });
@@ -139,7 +139,7 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
  * Start & graceful shutdown
  * ---------------------------------------------------------------------------*/
 const server = app.listen(PORT, () => {
-  console.log(`✅ API listening on :${PORT}`);
+  console.log(`âœ… API listening on :${PORT}`);
   console.log(`   Exports:  GET /api/invoices/export.csv`);
   console.log(`             GET /api/invoices/export.xlsx`);
   console.log(`             GET /api/invoices/:idOrNo/pdf (QR stamped, with dynamic fallback)`);
@@ -148,12 +148,12 @@ const server = app.listen(PORT, () => {
 });
 
 async function shutdown(signal: NodeJS.Signals) {
-  console.log(`\n↩️  Received ${signal}, shutting down...`);
+  console.log(`\nâ†©ï¸  Received ${signal}, shutting down...`);
   server.close(async () => {
     try {
       await prisma.$disconnect();
     } finally {
-      console.log('👋 Bye!');
+      console.log('ðŸ‘‹ Bye!');
       process.exit(0);
     }
   });
@@ -162,5 +162,5 @@ async function shutdown(signal: NodeJS.Signals) {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 process.on('unhandledRejection', (reason) => {
-  console.error('🚨 Unhandled Rejection:', reason);
+  console.error('ðŸš¨ Unhandled Rejection:', reason);
 });

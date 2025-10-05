@@ -1,4 +1,4 @@
-// src/utils/auth.ts
+﻿// src/utils/auth.ts
 import type { Request, Response, NextFunction } from 'express';
 import jwt, { type JwtPayload, type VerifyErrors, type JwtHeader, type SigningKeyCallback } from 'jsonwebtoken';
 import jwksClient, { type JwksClient } from 'jwks-rsa';

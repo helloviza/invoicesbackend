@@ -1,4 +1,4 @@
-// apps/backend/src/services/calc.ts
+﻿// apps/backend/src/services/calc.ts
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { z } from "zod";
 
@@ -238,7 +238,7 @@ export function computeLineParts(
 ): { base: number; tax: number; service: number; total: number } {
   const d = (details || {}) as Record<string, any>;
   let base = 0;
-  let taxExtra = 0;     // explicit “tax-like” charges
+  let taxExtra = 0;     // explicit â€œtax-likeâ€ charges
   let serviceExtra = 0; // explicit service-like charges
 
   switch (serviceType) {

@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
+﻿/* eslint-disable @typescript-eslint/no-explicit-any */
 import PdfPrinter from "pdfmake";
 import path from "path";
 import fs from "fs";
@@ -771,8 +771,8 @@ export function buildInvoiceDocDef(inv: InvoiceWithRels): any {
 /* ============================================================================
    PROFORMA (distinct layout; shows detailed description for ALL services)
    - Item & Description:
-       • FLIGHTS: Sectors (originDestination or From→To), Airline, Notes
-       • Others: composed from HEADERS mapping as label: value lines
+       â€¢ FLIGHTS: Sectors (originDestination or Fromâ†’To), Airline, Notes
+       â€¢ Others: composed from HEADERS mapping as label: value lines
    - Rate = Base (baseFare/fare/rate/unitPrice/price)
    - CGST% & SGST% = totalTax% / 2 ; Amount column = base (no tax)
    - Totals: Sub Total + CGST + SGST = Total
@@ -806,7 +806,7 @@ export function buildProformaDocDef(inv: InvoiceWithRels): any {
   // Printable address for Bill To
   const billToAddress = buildClientAddress(inv.client);
 
-  // ---------- Build “description” per line ----------
+  // ---------- Build â€œdescriptionâ€ per line ----------
   const toFlightDesc = (d: any) => {
     // Show Sectors primarily, else From/To
     const od = d.originDestination;
@@ -817,7 +817,7 @@ export function buildProformaDocDef(inv: InvoiceWithRels): any {
 
     const descLines: string[] = [];
     if (od) descLines.push(`Sectors: ${String(od)}`);
-    else descLines.push(`Sectors: ${from || "-"} → ${to || "-"}`);
+    else descLines.push(`Sectors: ${from || "-"} â†’ ${to || "-"}`);
     if (airline) descLines.push(`Airline: ${airline}`);
     if (notes) descLines.push(`Notes: ${notes}`);
     return descLines.join("\n");
@@ -1060,7 +1060,7 @@ export function buildProformaDocDef(inv: InvoiceWithRels): any {
                   [{ text: "Sub Total", alignment: "right" }, { text: inr(subTotal), alignment: "right" }],
                   ...(cgstPct ? [[{ text: `CGST (${cgstPct}%)`, alignment: "right" }, { text: inr(cgstTotal), alignment: "right" }]] : []),
                   ...(sgstPct ? [[{ text: `SGST (${sgstPct}%)`, alignment: "right" }, { text: inr(sgstTotal), alignment: "right" }]] : []),
-                  [{ text: "Total", bold: true, alignment: "right" }, { text: `₹${inr(grandTotal)}`, bold: true, alignment: "right" }],
+                  [{ text: "Total", bold: true, alignment: "right" }, { text: `â‚¹${inr(grandTotal)}`, bold: true, alignment: "right" }],
                 ],
               },
               layout: "lightHorizontalLines",

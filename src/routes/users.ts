@@ -1,11 +1,11 @@
-import { Router, type Request, type Response, type NextFunction } from "express";
+﻿import { Router, type Request, type Response, type NextFunction } from "express";
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
 
 const prisma = new PrismaClient();
 const router = Router();
 
-// password policy: 6–18, 1 upper, 1 lower, 1 digit, 1 special, no spaces
+// password policy: 6â€“18, 1 upper, 1 lower, 1 digit, 1 special, no spaces
 const PASSWORD_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9])[^\s]{6,18}$/;
 
 function ensureAdmin(req: Request, res: Response, next: NextFunction) {

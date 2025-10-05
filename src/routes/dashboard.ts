@@ -1,4 +1,4 @@
-import { Router } from "express";
+﻿import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
@@ -71,7 +71,7 @@ router.get("/summary", async (req, res) => {
   try {
     const where = buildWhere(req.query);
 
-    // 🔧 No `select` – let Prisma return all fields; we’ll pick what we need safely.
+    // ðŸ”§ No `select` â€“ let Prisma return all fields; weâ€™ll pick what we need safely.
     const rows = (await prisma.invoice.findMany({
       where,
       orderBy: [{ issueDate: "asc" }],
@@ -131,7 +131,7 @@ router.get("/daily", async (req, res) => {
   try {
     const where = buildWhere(req.query);
 
-    // 🔧 No `select` here either.
+    // ðŸ”§ No `select` here either.
     const rows = (await prisma.invoice.findMany({
       where,
       orderBy: [{ issueDate: "asc" }],

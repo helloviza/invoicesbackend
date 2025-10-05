@@ -1,4 +1,4 @@
-// apps/backend/src/routes/invoices.ts
+﻿// apps/backend/src/routes/invoices.ts
 import { Router, type Request, type Response } from "express";
 import { PrismaClient, InvoiceStatus } from "@prisma/client";
 import { z } from "zod";
@@ -158,9 +158,9 @@ function normalizeForPdf(inv: any) {
 
 /**
  * Render & upload a PDF.
- * - docKind = 'tax' → uses buildInvoiceDocDef() and stores/reads `pdfKey`
- * - docKind = 'performa' → uses buildProformaDocDef() and ALWAYS uploads under invoices/proforma/
- * - force = true → append -timestamp to key to bust caches and force rebuild
+ * - docKind = 'tax' â†’ uses buildInvoiceDocDef() and stores/reads `pdfKey`
+ * - docKind = 'performa' â†’ uses buildProformaDocDef() and ALWAYS uploads under invoices/proforma/
+ * - force = true â†’ append -timestamp to key to bust caches and force rebuild
  */
 async function renderUploadPdf(
   invRaw: any,
@@ -301,7 +301,7 @@ r.post("/", async (req: Request, res: Response) => {
       grandTotal: toMon(subtotal + taxTotal + serviceCharges),
       notes,
       createdById: userSub,
-      status: InvoiceStatus.DRAFT, // ✅ only valid Prisma enum values
+      status: InvoiceStatus.DRAFT, // âœ… only valid Prisma enum values
       signatureJson: meta ? (meta as unknown as object) : undefined,
       items: { create: createdItems },
     },

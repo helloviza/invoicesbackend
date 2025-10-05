@@ -1,4 +1,4 @@
-// apps/backend/src/routes/invoiceExports.ts
+﻿// apps/backend/src/routes/invoiceExports.ts
 import { Router } from "express";
 import dayjs from "dayjs";
 import ExcelJS from "exceljs";
@@ -11,7 +11,7 @@ import { PDFDocument, rgb } from "pdf-lib";
 // NOTE: We keep the .js specifier for Node ESM runtime, but TS can't resolve it.
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore - TS can't see ../pdf.ts behind ../pdf.js when using NodeNext/ESM; it's fine at runtime
-import { buildInvoiceDocDef, buildProformaDocDef, renderPdfBuffer, isProforma } from "../services/pdf.ts";
+import { buildInvoiceDocDef, buildProformaDocDef, renderPdfBuffer, isProforma } from "../services/pdf.js";
 
 const prisma = new PrismaClient();
 const router = Router();

@@ -1,4 +1,4 @@
-// apps/backend/src/routes/auth.ts
+﻿// apps/backend/src/routes/auth.ts
 import { Router } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
