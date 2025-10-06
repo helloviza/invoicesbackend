@@ -16,9 +16,6 @@ import { sendInvoiceEmail } from "../services/email.js";
 const prisma = new PrismaClient();
 const r = Router();
 
-/** Mongo ObjectId guard */
-const isObjectId = (s: string) => /^[0-9a-f]{24}$/i.test(s);
-
 /** Build a zod enum from your const tuple (slice() removes readonly) */
 const ServiceTypeZ = z.enum(SERVICE_TYPES.slice() as [string, ...string[]]);
 
@@ -88,7 +85,10 @@ const StatusInputZ = z.enum([
 function toPrismaStatus(s: z.infer<typeof StatusInputZ>): InvoiceStatus {
   const v = s.toLowerCase();
   if (v === "draft") return InvoiceStatus.DRAFT;
-  if (v === "sent" || v === "issued" || v === "overdue") return InvoiceStatus.SENT;
+  if (v === "sent" || v === "issued" || v === "overdue") {
+    // schema has no OVERDUE/ISSUED; map to SENT as closest
+    return InvoiceStatus.SENT;
+  }
   if (v === "paid") return InvoiceStatus.PAID;
   if (v === "void" || v === "cancelled" || v === "canceled") return InvoiceStatus.VOID;
   return InvoiceStatus.DRAFT;
@@ -99,15 +99,18 @@ const UpdateStatusSchema = z.object({ status: StatusInputZ });
 /** Money helper */
 const toMon = (n: number) => (Number.isFinite(n) ? n.toFixed(2) : "0.00");
 
-/** Resolve/validate tenantId so it is always a string */
+/* -----------------------------------------------------------------------------
+   TENANT: accept any non-empty string (UUID/ObjectId/custom); no 24-hex lock
+----------------------------------------------------------------------------- */
 function resolveTenantId(req: Request): string {
-  const id =
+  const idRaw =
     (req as any).user?.["custom:tenantId"] ??
     process.env.DEFAULT_TENANT_ID ??
     "";
-  if (!id || !isObjectId(id)) {
+  const id = String(idRaw || "").trim();
+  if (!id) {
     throw new Error(
-      "Missing/invalid tenant id. Provide custom:tenantId in the token or set DEFAULT_TENANT_ID (24-hex).",
+      "Missing tenant id. Ensure the JWT has `custom:tenantId` or set DEFAULT_TENANT_ID."
     );
   }
   return id;
@@ -150,6 +153,9 @@ function normalizeForPdf(inv: any) {
 
 /**
  * Render & upload a PDF.
+ * - docKind = 'tax' → uses buildInvoiceDocDef() and stores/reads `pdfKey`
+ * - docKind = 'performa' → uses buildProformaDocDef() and uploads under invoices/proforma/
+ * - force = true → append -timestamp to key to bust caches and force rebuild
  */
 async function renderUploadPdf(
   invRaw: any,
@@ -168,6 +174,7 @@ async function renderUploadPdf(
     return inv.pdfKey as string;
   }
 
+  // Build & upload
   const docDef = builder(inv);
   const buffer = await renderPdfBuffer(docDef);
 
@@ -210,123 +217,116 @@ function respondWithPdfUrl(req: Request, res: Response, key: string) {
 }
 
 /* ============================================================================
-   LIST: GET /api/invoices and POST /api/invoices/{search|list}
-   - supports filters, pagination, sorting
-   - returns { ok, items, total, page, pages } and legacy { data }
+   FLEXIBLE LISTING (supports GET /api/invoices and POST /api/invoices/{search|list})
+   - accepts q, billToId/billToName, status, dateFrom/dateTo, page, limit, sort
 ============================================================================ */
 
-const ListSchema = z.object({
-  page: z.coerce.number().min(1).default(1),
-  limit: z.coerce.number().min(1).max(100).default(20),
-  sort: z.string().optional(),        // e.g. "issueDate:desc" or "createdAt:asc"
-  q: z.string().optional(),           // free text
-  from: z.coerce.date().optional(),   // date range
-  to: z.coerce.date().optional(),
-  clientId: z.string().optional(),
-  status: z.string().optional(),      // friendly string; mapped to enum if provided
-});
+function parseListInput(req: Request) {
+  // Merge query + body (body wins for POST)
+  const src = { ...(req.query as any), ...(req.body as any) };
 
-function buildOrder(sort?: string) {
-  let field = "issueDate";
-  let dir: "asc" | "desc" = "desc";
-  if (sort) {
-    const [f, d] = sort.split(":");
-    if (f) field = f;
-    if (d === "asc" || d === "desc") dir = d as "asc" | "desc";
-  }
-  return [{ [field]: dir }, { createdAt: dir }] as any[];
+  const page = Math.max(1, parseInt(String(src.page ?? src.p ?? 1), 10) || 1);
+  const limit = Math.min(500, Math.max(1, parseInt(String(src.limit ?? src.perPage ?? src.pageSize ?? 50), 10) || 50));
+
+  const q = (src.q ?? src.search ?? src.query ?? src.invoiceNo ?? src.number ?? src.no) as string | undefined;
+
+  const billToId = (src.billToId ?? src.clientId ?? src.customerId) as string | undefined;
+  const billToName = (src.billToName ?? src.clientName ?? src.customerName ?? src.billTo) as string | undefined;
+
+  const statusRaw = (src.status ?? src.Status ?? (Array.isArray(src["statuses[]"]) ? src["statuses[]"]?.[0] : undefined)) as string | undefined;
+
+  const dateFrom = (src.dateFrom ?? src.from ?? src.issueDateFrom ?? src.createdFrom ?? src.date_gte ?? src.issuedFrom ?? src.createdAfter) as string | undefined;
+  const dateTo = (src.dateTo ?? src.to ?? src.issueDateTo ?? src.createdTo ?? src.date_lte ?? src.issuedTo ?? src.createdBefore) as string | undefined;
+
+  const sort = (src.sort ?? src.orderBy ?? "issueDate:desc") as string;
+
+  return { page, limit, q, billToId, billToName, statusRaw, dateFrom, dateTo, sort };
 }
 
-function buildWhere(input: z.infer<typeof ListSchema>, tenantId: string) {
-  const where: any = { tenantId };
+function parseSort(sort: string): { field: "issueDate" | "createdAt"; dir: "asc" | "desc" } {
+  const [f, d] = String(sort).split(":");
+  const field = (f === "createdAt" ? "createdAt" : "issueDate") as "issueDate" | "createdAt";
+  const dir = (String(d || "desc").toLowerCase() === "asc" ? "asc" : "desc") as "asc" | "desc";
+  return { field, dir };
+}
 
-  if (input.clientId) where.clientId = input.clientId;
+async function listInvoices(req: Request, res: Response) {
+  try {
+    const tenantId = resolveTenantId(req);
+    const { page, limit, q, billToId, billToName, statusRaw, dateFrom, dateTo, sort } = parseListInput(req);
 
-  if (input.status) {
-    try {
-      where.status = toPrismaStatus(input.status as any);
-    } catch {}
-  }
+    const where: any = { tenantId };
+    const AND: any[] = [];
 
-  if (input.q) {
-    const contains = (field: string) => ({ [field]: { contains: input.q, mode: "insensitive" } });
-    where.OR = [
-      contains("invoiceNo"),
-      contains("number"),
-      contains("notes"),
-      { client: { name: { contains: input.q, mode: "insensitive" } } },
-    ];
-  }
-
-  if (input.from || input.to) {
-    const range: any = {};
-    if (input.from) range.gte = input.from;
-    if (input.to) {
-      const t = new Date(input.to);
-      t.setHours(23, 59, 59, 999);
-      range.lte = t;
+    if (q) {
+      AND.push({
+        OR: [
+          { invoiceNo: { contains: String(q), mode: "insensitive" } },
+          { client: { name: { contains: String(q), mode: "insensitive" } } },
+        ],
+      });
     }
-    // Try common date fields
-    where.OR = (where.OR || []).concat([
-      { issueDate: range },
-      { invoiceDate: range },
-      { date: range },
-      { createdAt: range },
+
+    if (billToId) {
+      AND.push({ clientId: String(billToId) });
+    }
+    if (billToName) {
+      AND.push({ client: { name: { contains: String(billToName), mode: "insensitive" } } });
+    }
+
+    if (statusRaw) {
+      try {
+        const mapped = toPrismaStatus(statusRaw as any);
+        AND.push({ status: mapped });
+      } catch {
+        /* ignore bad status */
+      }
+    }
+
+    // Dates — prefer issueDate; if not set in your data, consider changing to createdAt
+    if (dateFrom) {
+      const d = new Date(dateFrom);
+      if (!isNaN(+d)) AND.push({ issueDate: { gte: d } });
+    }
+    if (dateTo) {
+      const d = new Date(dateTo);
+      if (!isNaN(+d)) AND.push({ issueDate: { lte: d } });
+    }
+
+    if (AND.length) where.AND = AND;
+
+    const { field, dir } = parseSort(sort);
+
+    const [total, items] = await Promise.all([
+      prisma.invoice.count({ where }),
+      prisma.invoice.findMany({
+        where,
+        orderBy: { [field]: dir } as any,
+        include: { client: true, items: true },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
     ]);
-  }
 
-  return where;
-}
-
-async function listHandler(req: Request, res: Response) {
-  let input: z.infer<typeof ListSchema>;
-  try {
-    input = ListSchema.parse(req.method === "GET" ? req.query : req.body);
-  } catch (e: any) {
-    return res.status(400).json({ ok: false, message: "Invalid filters", errors: e?.flatten?.() });
-  }
-
-  let tenantId: string;
-  try {
-    tenantId = resolveTenantId(req);
+    return res.json({ ok: true, items, total, page, limit });
   } catch (e) {
     return res.status(400).json({ ok: false, message: (e as Error).message });
   }
-
-  const { page, limit, sort } = input;
-  const skip = (page - 1) * limit;
-
-  const where = buildWhere(input, tenantId);
-  const orderBy = buildOrder(sort);
-
-  const [items, total] = await Promise.all([
-    prisma.invoice.findMany({
-      where,
-      orderBy,
-      skip,
-      take: limit,
-      include: { client: true, items: true },
-    }),
-    prisma.invoice.count({ where }),
-  ]);
-
-  return res.json({
-    ok: true,
-    items,
-    total,
-    page,
-    pages: Math.max(1, Math.ceil(total / limit)),
-    // legacy key for older UI bits
-    data: items,
-  });
 }
 
-r.get("/", listHandler);
-r.post("/search", listHandler);
-r.post("/list", listHandler);
+/* ============================================================================
+   GET /api/invoices  -> list by tenant (now filter-aware)
+============================================================================ */
+r.get("/", listInvoices);
 
 /* ============================================================================
-   CREATE: POST /api/invoices
+   POST /api/invoices/search and /api/invoices/list -> alternate list endpoints
+============================================================================ */
+r.post("/search", listInvoices);
+r.post("/list", listInvoices);
+
+/* ============================================================================
+   POST /api/invoices  -> create (normalize % and amounts)
 ============================================================================ */
 r.post("/", async (req: Request, res: Response) => {
   let tenantId: string;
@@ -399,7 +399,7 @@ r.post("/", async (req: Request, res: Response) => {
 });
 
 /* ============================================================================
-   READ helpers
+   READ helpers (handy for debugging)
 ============================================================================ */
 r.get("/by-no/:no", async (req: Request, res: Response) => {
   try {
@@ -417,10 +417,11 @@ r.get("/by-no/:no", async (req: Request, res: Response) => {
 
 r.get("/:id", async (req: Request, res: Response) => {
   const id = req.params.id;
-  if (!isObjectId(id)) {
+  // keep a soft check but allow any string; prisma will 404 if not found
+  if (!id || typeof id !== "string") {
     return res
       .status(400)
-      .json({ ok: false, message: "id must be a 24-hex Mongo ObjectId" });
+      .json({ ok: false, message: "Bad id" });
   }
   const inv = await prisma.invoice.findUnique({
     where: { id },
@@ -431,7 +432,7 @@ r.get("/:id", async (req: Request, res: Response) => {
 });
 
 /* ============================================================================
-   PDFs
+   GET /api/invoices/by-no/:no/pdf  -> supports ?doc=performa&force=1
 ============================================================================ */
 r.get("/by-no/:no/pdf", async (req: Request, res: Response) => {
   try {
@@ -456,6 +457,9 @@ r.get("/by-no/:no/pdf", async (req: Request, res: Response) => {
   }
 });
 
+/* ============================================================================
+   GET /api/invoices/:idOrNo/pdf  -> id or invoiceNo, supports ?doc=performa&force=1
+============================================================================ */
 r.get("/:idOrNo/pdf", async (req: Request, res: Response) => {
   try {
     const idOrNo = req.params.idOrNo;
@@ -464,12 +468,14 @@ r.get("/:idOrNo/pdf", async (req: Request, res: Response) => {
 
     let inv: any | null = null;
 
-    if (isObjectId(idOrNo)) {
-      inv = await prisma.invoice.findUnique({
-        where: { id: idOrNo },
-        include: { client: true, items: true },
-      });
-    } else {
+    // Try by primary key
+    inv = await prisma.invoice.findUnique({
+      where: { id: idOrNo },
+      include: { client: true, items: true },
+    });
+
+    // Fallback by invoiceNo within tenant
+    if (!inv) {
       const tenantId = resolveTenantId(req);
       inv = await prisma.invoice.findFirst({
         where: { invoiceNo: idOrNo, tenantId },
@@ -490,6 +496,9 @@ r.get("/:idOrNo/pdf", async (req: Request, res: Response) => {
   }
 });
 
+/* ============================================================================
+   PRETTY URLS for PROFORMA PDFs (no query params needed)
+============================================================================ */
 r.get("/:id/proforma.pdf", (req: Request, res: Response) => {
   const qs = new URLSearchParams({
     doc: "performa",
@@ -507,14 +516,14 @@ r.get("/by-no/:no/proforma.pdf", (req: Request, res: Response) => {
 });
 
 /* ============================================================================
-   EMAIL TAX INVOICE
+   EMAIL TAX INVOICE (ensures TAX PDF exists)
 ============================================================================ */
 r.post("/:id/email", async (req: Request, res: Response) => {
   const id = req.params.id;
-  if (!isObjectId(id)) {
+  if (!id || typeof id !== "string") {
     return res
       .status(400)
-      .json({ ok: false, message: "id must be a 24-hex Mongo ObjectId" });
+      .json({ ok: false, message: "Bad id" });
   }
 
   const inv = await prisma.invoice.findUnique({
@@ -560,11 +569,12 @@ r.post("/:id/email", async (req: Request, res: Response) => {
 });
 
 /* ============================================================================
-   SIMPLE STATUS ENDPOINTS
+   SIMPLE STATUS ENDPOINTS (enum-safe)
 ============================================================================ */
 async function setInvoiceStatus(id: string, status: InvoiceStatus) {
   const patch: Record<string, any> = { status };
   if (status === InvoiceStatus.SENT) {
+    // Optional: stamp issueDate on "issue/send"
     patch.issueDate = new Date();
   }
   return prisma.invoice.update({
@@ -576,7 +586,7 @@ async function setInvoiceStatus(id: string, status: InvoiceStatus) {
 
 function ensureId(req: Request, res: Response): string | null {
   const { id } = req.params;
-  if (!isObjectId(id)) {
+  if (!id) {
     res.status(400).json({ ok: false, message: "Bad id" });
     return null;
   }
