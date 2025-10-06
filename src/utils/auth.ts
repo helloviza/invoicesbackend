@@ -1,6 +1,11 @@
-﻿// src/utils/auth.ts
+﻿// apps/backend/src/utils/auth.ts
 import type { Request, Response, NextFunction } from 'express';
-import jwt, { type JwtPayload, type VerifyErrors, type JwtHeader, type SigningKeyCallback } from 'jsonwebtoken';
+import jwt, {
+  type JwtPayload,
+  type VerifyErrors,
+  type JwtHeader,
+  type SigningKeyCallback,
+} from 'jsonwebtoken';
 import jwksClient, { type JwksClient } from 'jwks-rsa';
 
 const DISABLE_AUTH = /^true$/i.test(process.env.DISABLE_AUTH || '');
@@ -11,6 +16,7 @@ const COGNITO_AUDIENCE = process.env.COGNITO_AUDIENCE;
 
 const isObjectId = (s?: string) => !!s && /^[0-9a-f]{24}$/i.test(s);
 
+/* ------------------------------ Cognito/JWKS ------------------------------ */
 function cognitoIssuer(): string | undefined {
   if (process.env.COGNITO_ISSUER) return process.env.COGNITO_ISSUER;
   const region = process.env.COGNITO_REGION;
@@ -46,6 +52,7 @@ function getJwksKey(header: JwtHeader, cb: SigningKeyCallback) {
   });
 }
 
+/* --------------------------------- Types ---------------------------------- */
 export interface AuthedPayload extends JwtPayload {
   sub?: string;
   email?: string;
@@ -53,6 +60,7 @@ export interface AuthedPayload extends JwtPayload {
   'custom:tenantId'?: string;
 }
 
+/* -------------------------- Tenant Id enrichment -------------------------- */
 /**
  * Try to ensure a tenant id is present on the request user object.
  * Prefers header X-Tenant-Id, then DEFAULT_TENANT_ID, then DEV_TENANT_ID.
@@ -77,18 +85,65 @@ function ensureTenantId(req: Request, payload: AuthedPayload): AuthedPayload {
   return payload;
 }
 
+/* ------------------------------- Open paths ------------------------------- */
 function isOpenPath(req: Request): boolean {
   // server.ts mounts at /api, so here req.path is relative to /api
   if (req.method === 'OPTIONS') return true;
-  if (req.path === '/health') return true;      // /api/health is mounted outside anyway; safe guard
+  if (req.path === '/health') return true;       // /api/health is also mounted outside; safe guard
   if (req.path.startsWith('/auth')) return true; // login/register/refresh etc
   return false;
 }
 
+/* --------------------------- Token extraction ----------------------------- */
+function parseCookies(raw?: string | null): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!raw) return out;
+  raw.split(';').forEach((p) => {
+    const [k, ...rest] = p.trim().split('=');
+    if (!k) return;
+    const v = rest.join('='); // value may contain '='
+    try {
+      out[decodeURIComponent(k)] = decodeURIComponent(v || '');
+    } catch {
+      out[k] = v || '';
+    }
+  });
+  return out;
+}
+
+function extractToken(req: Request): string | null {
+  // 1) Authorization: Bearer ...
+  const authz = (req.headers.authorization as string) || (req.headers as any).Authorization;
+  if (authz && /^Bearer\s+/i.test(authz)) {
+    return authz.replace(/^Bearer\s+/i, '').trim();
+  }
+
+  // 2) Cookie: jwt | token | access_token | idToken
+  const cookies = parseCookies(req.headers.cookie || null);
+  const cookieToken =
+    cookies.jwt ||
+    cookies.token ||
+    cookies.access_token ||
+    cookies.idToken ||
+    cookies.IDToken ||
+    '';
+  if (cookieToken) return cookieToken.trim();
+
+  // 3) Query param ?token= (or ?jwt=/ ?access_token=)
+  const qp =
+    (req.query.token as string | undefined) ||
+    (req.query.jwt as string | undefined) ||
+    (req.query.access_token as string | undefined);
+  if (typeof qp === 'string' && qp.trim()) return qp.trim();
+
+  return null;
+}
+
+/* -------------------------------- Middleware ------------------------------ */
 export default function auth(req: Request, res: Response, next: NextFunction) {
   if (isOpenPath(req)) return next();
 
-  // 1) Local dev bypass
+  // Local dev bypass
   if (DISABLE_AUTH) {
     (req as any).user = ensureTenantId(req, {
       sub: 'dev-user',
@@ -99,51 +154,63 @@ export default function auth(req: Request, res: Response, next: NextFunction) {
     return next();
   }
 
-  // 2) Extract Bearer token
-  const authz = req.headers.authorization;
-  if (!authz || !authz.startsWith('Bearer ')) {
+  // Extract token from header, cookie or query
+  const token = extractToken(req);
+  if (!token) {
     return res.status(401).json({ ok: false, message: 'Missing Bearer token' });
   }
-  const token = authz.slice(7);
 
-  // 3) Choose verification strategy
   const issuer = cognitoIssuer();
 
-  // 3a) First-party HS256 (JWT_SECRET)
+  // HS256 (first-party) verification
   if (JWT_SECRET) {
     const verifyOpts: jwt.VerifyOptions = {
       algorithms: ['HS256'],
       ...(COGNITO_AUDIENCE ? { audience: COGNITO_AUDIENCE } : {}),
-      // no issuer on HS256 unless you set one in your login code
+      // no issuer check for HS256 unless you set one when signing
     };
-    jwt.verify(token, JWT_SECRET, verifyOpts, (err: VerifyErrors | null, decoded?: JwtPayload | string) => {
-      if (err) return res.status(401).json({ ok: false, message: 'Invalid token', error: err.message });
-      const payload: AuthedPayload =
-        typeof decoded === 'string' ? (JSON.parse(decoded) as AuthedPayload) : ((decoded as AuthedPayload) || {});
-      (req as any).user = ensureTenantId(req, payload);
-      return next();
-    });
+    jwt.verify(
+      token,
+      JWT_SECRET,
+      verifyOpts,
+      (err: VerifyErrors | null, decoded?: JwtPayload | string) => {
+        if (err) return res.status(401).json({ ok: false, message: 'Invalid token', error: err.message });
+        const payload: AuthedPayload =
+          typeof decoded === 'string'
+            ? (JSON.parse(decoded) as AuthedPayload)
+            : ((decoded as AuthedPayload) || {});
+        (req as any).user = ensureTenantId(req, payload);
+        return next();
+      }
+    );
     return;
   }
 
-  // 3b) Cognito / OIDC with RS256 JWKS
+  // RS256 (Cognito/OIDC) via JWKS
   if (issuer) {
     const verifyOpts: jwt.VerifyOptions = {
       algorithms: ['RS256'],
       issuer,
       ...(COGNITO_AUDIENCE ? { audience: COGNITO_AUDIENCE } : {}),
     };
-    jwt.verify(token, getJwksKey, verifyOpts, (err: VerifyErrors | null, decoded?: JwtPayload | string) => {
-      if (err) return res.status(401).json({ ok: false, message: 'Invalid token', error: err.message });
-      const payload: AuthedPayload =
-        typeof decoded === 'string' ? (JSON.parse(decoded) as AuthedPayload) : ((decoded as AuthedPayload) || {});
-      (req as any).user = ensureTenantId(req, payload);
-      return next();
-    });
+    jwt.verify(
+      token,
+      getJwksKey,
+      verifyOpts,
+      (err: VerifyErrors | null, decoded?: JwtPayload | string) => {
+        if (err) return res.status(401).json({ ok: false, message: 'Invalid token', error: err.message });
+        const payload: AuthedPayload =
+          typeof decoded === 'string'
+            ? (JSON.parse(decoded) as AuthedPayload)
+            : ((decoded as AuthedPayload) || {});
+        (req as any).user = ensureTenantId(req, payload);
+        return next();
+      }
+    );
     return;
   }
 
-  // 3c) No strategy configured -> fail closed with a helpful message
+  // No strategy configured
   return res.status(401).json({
     ok: false,
     message:

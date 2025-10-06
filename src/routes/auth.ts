@@ -15,9 +15,11 @@ const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
 const TOKEN_TTL_SECONDS = Number(process.env.JWT_TTL_SECONDS || 60 * 60 * 8); // 8h
 const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || '';
 
-const COOKIE_NAME = process.env.COOKIE_NAME || 'session';
-const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN || '.invoices.plumtrips.com';
-const COOKIE_SECURE = process.env.NODE_ENV === 'production';  // App Runner -> true
+/** Important: align cookie name with auth middleware expectations */
+const COOKIE_NAME = process.env.COOKIE_NAME || 'jwt';
+/** Domain that covers both frontend and API subdomains */
+const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN || '.plumtrips.com';
+const COOKIE_SECURE = process.env.NODE_ENV === 'production'; // App Runner -> true
 
 const isObjectId = (s?: string) => !!s && /^[0-9a-f]{24}$/i.test(s);
 
@@ -29,7 +31,7 @@ try {
   // @ts-ignore optional
   bcrypt = (await import('bcryptjs')).default ?? (await import('bcryptjs'));
 } catch {
-  /* use PBKDF2 fallback */
+  /* PBKDF2 fallback */
 }
 
 async function hashPassword(pw: string): Promise<string> {
@@ -66,8 +68,13 @@ function setAuthCookie(res: any, token: string) {
   res.cookie(COOKIE_NAME, token, {
     httpOnly: true,
     secure: COOKIE_SECURE,
-    sameSite: 'none',           // cross-site
-    domain: COOKIE_DOMAIN,      // .invoices.plumtrips.com (covers invoices.* and api.invoices.*)
+    /**
+     * SameSite:
+     * Subdomains are considered same-site; Lax would also work.
+     * We keep 'none' to be future-proof if you later split across sites.
+     */
+    sameSite: 'none',
+    domain: COOKIE_DOMAIN, // e.g. .plumtrips.com
     path: '/',
     maxAge: TOKEN_TTL_SECONDS * 1000,
   });
@@ -89,8 +96,8 @@ function getTokenFromReq(req: any): string | null {
   if (!raw) return null;
   const match = raw
     .split(';')
-    .map(s => s.trim())
-    .find(c => c.startsWith(`${COOKIE_NAME}=`));
+    .map((s) => s.trim())
+    .find((c) => c.startsWith(`${COOKIE_NAME}=`));
   return match ? decodeURIComponent(match.substring(COOKIE_NAME.length + 1)) : null;
 }
 
@@ -105,15 +112,17 @@ const RegisterSchema = z.object({
   tenantName: z.string().min(1).optional(),
 });
 
-const LoginSchemaFlexible = z.object({
-  usernameOrEmail: z.string().optional(),
-  username: z.string().optional(),
-  email: z.string().email().optional(),
-  password: z.string().min(1),
-}).refine(
-  (d) => !!(d.usernameOrEmail || d.username || d.email),
-  { message: 'Provide usernameOrEmail, username, or email', path: ['usernameOrEmail'] },
-);
+const LoginSchemaFlexible = z
+  .object({
+    usernameOrEmail: z.string().optional(),
+    username: z.string().optional(),
+    email: z.string().email().optional(),
+    password: z.string().min(1),
+  })
+  .refine((d) => !!(d.usernameOrEmail || d.username || d.email), {
+    message: 'Provide usernameOrEmail, username, or email',
+    path: ['usernameOrEmail'],
+  });
 
 /* tiny slugger for tenant slugs */
 function slugify(s: string) {
@@ -229,7 +238,7 @@ r.post('/login', async (req, res) => {
 /* ---------------------------------------------------------------------------
    POST /api/auth/logout  (clear cookie)
 --------------------------------------------------------------------------- */
-r.post('/logout', (req, res) => {
+r.post('/logout', (_req, res) => {
   clearAuthCookie(res);
   res.json({ ok: true });
 });
