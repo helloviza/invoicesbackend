@@ -15,7 +15,7 @@ import authMiddleware from './utils/auth.js';
 import invoiceExports from './routes/invoiceExports.js'; // default export (router)
 import dashboardRouter from './routes/dashboard.js';
 import importPreviewRouter from './routes/importPreview.js';
-import usersRouter from "./routes/users.js";
+import usersRouter from './routes/users.js';
 
 /** ----------------------------------------------------------------------------
  * App + config
@@ -27,15 +27,15 @@ const PORT = Number(process.env.PORT || 8080);
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const PUBLIC_URL = process.env.BACKEND_PUBLIC_URL || `http://localhost:${PORT}`;
 
-// Support comma-separated whitelist OR "*"
+// Support comma-separated whitelist OR "*" (exact matches, no trailing slashes)
 const FRONTEND_ORIGINS = (process.env.FRONTEND_ORIGIN || 'http://localhost:5173')
   .split(',')
   .map(s => s.trim())
   .filter(Boolean);
 const allowed = new Set(FRONTEND_ORIGINS);
 
-// Trust proxy (ELB/ALB)
-app.set('trust proxy', true);
+// Trust the first proxy (App Runner / ALB) so secure cookies work
+app.set('trust proxy', 1);
 
 // Remove X-Powered-By
 app.disable('x-powered-by');
@@ -43,14 +43,17 @@ app.disable('x-powered-by');
 // Helmet (allow cross-origin resource policy so PDFs work when opened from other origins)
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
-// Typed CORS options
+// Typed CORS options — allow credentials for cookie-based auth
 const corsOptions: CorsOptions = {
   origin(origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) {
-    if (!origin) return cb(null, true);
+    if (!origin) return cb(null, true); // non-browser / same-origin
     if (allowed.has('*') || allowed.has(origin)) return cb(null, true);
     return cb(new Error(`CORS: origin ${origin} not allowed`));
   },
   credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  exposedHeaders: ['Content-Disposition'], // for file downloads
 };
 
 // Apply CORS and handle preflight
@@ -110,7 +113,7 @@ app.use('/api', authMiddleware);
  * ---------------------------------------------------------------------------*/
 app.use('/api/clients', clientsRouter);
 
-// Generic invoices router (your CRUD and any built-in PDF endpoints it might have)
+// Generic invoices router (CRUD + any PDF endpoints it has)
 app.use('/api/invoices', invoicesRouter);
 
 // Export routes (csv/xlsx + QR PDF; also adds /:idOrNo/pdf and /by-no/:no/pdf with fallback)
@@ -129,7 +132,7 @@ app.use((req: Request, res: Response) => {
 // Error handler
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   const message = err instanceof Error ? err.message : 'Internal Server Error';
-  if (NODE_ENV !== 'test') console.error('ðŸ”¥ Unhandled error:', err);
+  if (NODE_ENV !== 'test') console.error('🔥 Unhandled error:', err);
   res
     .status(500)
     .json({ ok: false, message, ...(NODE_ENV === 'development' ? { stack: (err as any)?.stack } : {}) });
@@ -139,7 +142,7 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
  * Start & graceful shutdown
  * ---------------------------------------------------------------------------*/
 const server = app.listen(PORT, () => {
-  console.log(`âœ… API listening on :${PORT}`);
+  console.log(`✅ API listening on :${PORT}`);
   console.log(`   Exports:  GET /api/invoices/export.csv`);
   console.log(`             GET /api/invoices/export.xlsx`);
   console.log(`             GET /api/invoices/:idOrNo/pdf (QR stamped, with dynamic fallback)`);
@@ -148,12 +151,12 @@ const server = app.listen(PORT, () => {
 });
 
 async function shutdown(signal: NodeJS.Signals) {
-  console.log(`\nâ†©ï¸  Received ${signal}, shutting down...`);
+  console.log(`\n↩️  Received ${signal}, shutting down...`);
   server.close(async () => {
     try {
       await prisma.$disconnect();
     } finally {
-      console.log('ðŸ‘‹ Bye!');
+      console.log('👋 Bye!');
       process.exit(0);
     }
   });
@@ -162,5 +165,5 @@ async function shutdown(signal: NodeJS.Signals) {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 process.on('unhandledRejection', (reason) => {
-  console.error('ðŸš¨ Unhandled Rejection:', reason);
+  console.error('🚨 Unhandled Rejection:', reason);
 });

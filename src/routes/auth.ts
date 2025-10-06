@@ -8,18 +8,22 @@ import crypto from 'crypto';
 const r = Router();
 const prisma = new PrismaClient();
 
-/* -----------------------------------------------------------------------------
+/* ---------------------------------------------------------------------------
    Config
------------------------------------------------------------------------------ */
+--------------------------------------------------------------------------- */
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
 const TOKEN_TTL_SECONDS = Number(process.env.JWT_TTL_SECONDS || 60 * 60 * 8); // 8h
 const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || '';
 
+const COOKIE_NAME = process.env.COOKIE_NAME || 'session';
+const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN || '.invoices.plumtrips.com';
+const COOKIE_SECURE = process.env.NODE_ENV === 'production';  // App Runner -> true
+
 const isObjectId = (s?: string) => !!s && /^[0-9a-f]{24}$/i.test(s);
 
-/* -----------------------------------------------------------------------------
+/* ---------------------------------------------------------------------------
    Optional bcryptjs (fallback to PBKDF2 if not installed)
------------------------------------------------------------------------------ */
+--------------------------------------------------------------------------- */
 let bcrypt: any = null;
 try {
   // @ts-ignore optional
@@ -55,9 +59,44 @@ function signToken(payload: Record<string, any>) {
   return jwt.sign(payload, JWT_SECRET, { algorithm: 'HS256', expiresIn: TOKEN_TTL_SECONDS });
 }
 
-/* -----------------------------------------------------------------------------
+/* ---------------------------------------------------------------------------
+   Cookie helpers
+--------------------------------------------------------------------------- */
+function setAuthCookie(res: any, token: string) {
+  res.cookie(COOKIE_NAME, token, {
+    httpOnly: true,
+    secure: COOKIE_SECURE,
+    sameSite: 'none',           // cross-site
+    domain: COOKIE_DOMAIN,      // .invoices.plumtrips.com (covers invoices.* and api.invoices.*)
+    path: '/',
+    maxAge: TOKEN_TTL_SECONDS * 1000,
+  });
+}
+function clearAuthCookie(res: any) {
+  res.clearCookie(COOKIE_NAME, {
+    domain: COOKIE_DOMAIN,
+    path: '/',
+    secure: COOKIE_SECURE,
+    sameSite: 'none',
+  });
+}
+function getTokenFromReq(req: any): string | null {
+  const authz: string | undefined = req.headers.authorization;
+  if (authz?.startsWith('Bearer ')) return authz.slice(7);
+
+  // Parse cookie header without cookie-parser
+  const raw = req.headers.cookie as string | undefined;
+  if (!raw) return null;
+  const match = raw
+    .split(';')
+    .map(s => s.trim())
+    .find(c => c.startsWith(`${COOKIE_NAME}=`));
+  return match ? decodeURIComponent(match.substring(COOKIE_NAME.length + 1)) : null;
+}
+
+/* ---------------------------------------------------------------------------
    Schemas
------------------------------------------------------------------------------ */
+--------------------------------------------------------------------------- */
 const RegisterSchema = z.object({
   name: z.string().min(1),
   email: z.string().email(),
@@ -81,9 +120,9 @@ function slugify(s: string) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 }
 
-/* -----------------------------------------------------------------------------
+/* ---------------------------------------------------------------------------
    POST /api/auth/register
------------------------------------------------------------------------------ */
+--------------------------------------------------------------------------- */
 r.post('/register', async (req, res) => {
   let input: z.infer<typeof RegisterSchema>;
   try {
@@ -127,7 +166,7 @@ r.post('/register', async (req, res) => {
       email: email.toLowerCase(),
       username: username.toLowerCase(),
       passwordHash,
-      role: 'VIEWER', // string literal to avoid enum import churn
+      role: 'VIEWER',
     },
     select: { id: true, name: true, email: true, username: true, tenantId: true, role: true },
   });
@@ -140,12 +179,14 @@ r.post('/register', async (req, res) => {
     'custom:tenantId': user.tenantId,
   });
 
+  // set cookie (plus still return JSON token)
+  setAuthCookie(res, token);
   res.json({ ok: true, token, user });
 });
 
-/* -----------------------------------------------------------------------------
+/* ---------------------------------------------------------------------------
    POST /api/auth/login  (flexible keys)
------------------------------------------------------------------------------ */
+--------------------------------------------------------------------------- */
 r.post('/login', async (req, res) => {
   let input: z.infer<typeof LoginSchemaFlexible>;
   try {
@@ -175,6 +216,9 @@ r.post('/login', async (req, res) => {
     'custom:tenantId': user.tenantId,
   });
 
+  // set cookie (and return token for SPA header flow)
+  setAuthCookie(res, token);
+
   res.json({
     ok: true,
     token,
@@ -182,13 +226,21 @@ r.post('/login', async (req, res) => {
   });
 });
 
-/* -----------------------------------------------------------------------------
-   GET /api/auth/me
------------------------------------------------------------------------------ */
+/* ---------------------------------------------------------------------------
+   POST /api/auth/logout  (clear cookie)
+--------------------------------------------------------------------------- */
+r.post('/logout', (req, res) => {
+  clearAuthCookie(res);
+  res.json({ ok: true });
+});
+
+/* ---------------------------------------------------------------------------
+   GET /api/auth/me  (reads Bearer OR cookie)
+--------------------------------------------------------------------------- */
 r.get('/me', (req, res) => {
-  const authz = req.headers.authorization;
-  if (!authz?.startsWith('Bearer ')) return res.status(401).json({ ok: false, message: 'Missing Bearer token' });
-  const token = authz.slice(7);
+  const token = getTokenFromReq(req);
+  if (!token) return res.status(401).json({ ok: false, message: 'Missing token (Bearer or cookie)' });
+
   try {
     const payload = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] }) as Record<string, any>;
     return res.json({ ok: true, user: payload });
