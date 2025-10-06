@@ -77,9 +77,7 @@ const NewInvoiceSchema = z.object({
   meta: MetaZ.optional(), // <-- stored into signatureJson
 });
 
-/** ---- Status helpers (normalize to Prisma enum) ----
- * We accept common labels and map them to your enum: DRAFT | SENT | PAID | VOID
- */
+/** ---- Status helpers (normalize to Prisma enum) ---- */
 const StatusInputZ = z.enum([
   "draft", "sent", "paid", "void",
   "issued", "overdue", "cancelled", "canceled",
@@ -90,19 +88,13 @@ const StatusInputZ = z.enum([
 function toPrismaStatus(s: z.infer<typeof StatusInputZ>): InvoiceStatus {
   const v = s.toLowerCase();
   if (v === "draft") return InvoiceStatus.DRAFT;
-  if (v === "sent" || v === "issued" || v === "overdue") {
-    // NOTE: schema has no OVERDUE/ISSUED; we map these to SENT as the closest state.
-    return InvoiceStatus.SENT;
-  }
+  if (v === "sent" || v === "issued" || v === "overdue") return InvoiceStatus.SENT;
   if (v === "paid") return InvoiceStatus.PAID;
   if (v === "void" || v === "cancelled" || v === "canceled") return InvoiceStatus.VOID;
   return InvoiceStatus.DRAFT;
 }
 
 const UpdateStatusSchema = z.object({ status: StatusInputZ });
-
-/** Email payload */
-const EmailPayload = z.object({ to: z.array(z.string().email()).min(1) });
 
 /** Money helper */
 const toMon = (n: number) => (Number.isFinite(n) ? n.toFixed(2) : "0.00");
@@ -158,9 +150,6 @@ function normalizeForPdf(inv: any) {
 
 /**
  * Render & upload a PDF.
- * - docKind = 'tax' â†’ uses buildInvoiceDocDef() and stores/reads `pdfKey`
- * - docKind = 'performa' â†’ uses buildProformaDocDef() and ALWAYS uploads under invoices/proforma/
- * - force = true â†’ append -timestamp to key to bust caches and force rebuild
  */
 async function renderUploadPdf(
   invRaw: any,
@@ -179,7 +168,6 @@ async function renderUploadPdf(
     return inv.pdfKey as string;
   }
 
-  // Build & upload
   const docDef = builder(inv);
   const buffer = await renderPdfBuffer(docDef);
 
@@ -222,24 +210,123 @@ function respondWithPdfUrl(req: Request, res: Response, key: string) {
 }
 
 /* ============================================================================
-   GET /api/invoices  -> list by tenant
+   LIST: GET /api/invoices and POST /api/invoices/{search|list}
+   - supports filters, pagination, sorting
+   - returns { ok, items, total, page, pages } and legacy { data }
 ============================================================================ */
-r.get("/", async (req: Request, res: Response) => {
-  try {
-    const tenantId = resolveTenantId(req);
-    const list = await prisma.invoice.findMany({
-      where: { tenantId },
-      orderBy: { createdAt: "desc" },
-      include: { client: true, items: true },
-    });
-    res.json({ ok: true, data: list });
-  } catch (e) {
-    res.status(400).json({ ok: false, message: (e as Error).message });
-  }
+
+const ListSchema = z.object({
+  page: z.coerce.number().min(1).default(1),
+  limit: z.coerce.number().min(1).max(100).default(20),
+  sort: z.string().optional(),        // e.g. "issueDate:desc" or "createdAt:asc"
+  q: z.string().optional(),           // free text
+  from: z.coerce.date().optional(),   // date range
+  to: z.coerce.date().optional(),
+  clientId: z.string().optional(),
+  status: z.string().optional(),      // friendly string; mapped to enum if provided
 });
 
+function buildOrder(sort?: string) {
+  let field = "issueDate";
+  let dir: "asc" | "desc" = "desc";
+  if (sort) {
+    const [f, d] = sort.split(":");
+    if (f) field = f;
+    if (d === "asc" || d === "desc") dir = d as "asc" | "desc";
+  }
+  return [{ [field]: dir }, { createdAt: dir }] as any[];
+}
+
+function buildWhere(input: z.infer<typeof ListSchema>, tenantId: string) {
+  const where: any = { tenantId };
+
+  if (input.clientId) where.clientId = input.clientId;
+
+  if (input.status) {
+    try {
+      where.status = toPrismaStatus(input.status as any);
+    } catch {}
+  }
+
+  if (input.q) {
+    const contains = (field: string) => ({ [field]: { contains: input.q, mode: "insensitive" } });
+    where.OR = [
+      contains("invoiceNo"),
+      contains("number"),
+      contains("notes"),
+      { client: { name: { contains: input.q, mode: "insensitive" } } },
+    ];
+  }
+
+  if (input.from || input.to) {
+    const range: any = {};
+    if (input.from) range.gte = input.from;
+    if (input.to) {
+      const t = new Date(input.to);
+      t.setHours(23, 59, 59, 999);
+      range.lte = t;
+    }
+    // Try common date fields
+    where.OR = (where.OR || []).concat([
+      { issueDate: range },
+      { invoiceDate: range },
+      { date: range },
+      { createdAt: range },
+    ]);
+  }
+
+  return where;
+}
+
+async function listHandler(req: Request, res: Response) {
+  let input: z.infer<typeof ListSchema>;
+  try {
+    input = ListSchema.parse(req.method === "GET" ? req.query : req.body);
+  } catch (e: any) {
+    return res.status(400).json({ ok: false, message: "Invalid filters", errors: e?.flatten?.() });
+  }
+
+  let tenantId: string;
+  try {
+    tenantId = resolveTenantId(req);
+  } catch (e) {
+    return res.status(400).json({ ok: false, message: (e as Error).message });
+  }
+
+  const { page, limit, sort } = input;
+  const skip = (page - 1) * limit;
+
+  const where = buildWhere(input, tenantId);
+  const orderBy = buildOrder(sort);
+
+  const [items, total] = await Promise.all([
+    prisma.invoice.findMany({
+      where,
+      orderBy,
+      skip,
+      take: limit,
+      include: { client: true, items: true },
+    }),
+    prisma.invoice.count({ where }),
+  ]);
+
+  return res.json({
+    ok: true,
+    items,
+    total,
+    page,
+    pages: Math.max(1, Math.ceil(total / limit)),
+    // legacy key for older UI bits
+    data: items,
+  });
+}
+
+r.get("/", listHandler);
+r.post("/search", listHandler);
+r.post("/list", listHandler);
+
 /* ============================================================================
-   POST /api/invoices  -> create (normalize % and amounts)
+   CREATE: POST /api/invoices
 ============================================================================ */
 r.post("/", async (req: Request, res: Response) => {
   let tenantId: string;
@@ -301,7 +388,7 @@ r.post("/", async (req: Request, res: Response) => {
       grandTotal: toMon(subtotal + taxTotal + serviceCharges),
       notes,
       createdById: userSub,
-      status: InvoiceStatus.DRAFT, // âœ… only valid Prisma enum values
+      status: InvoiceStatus.DRAFT,
       signatureJson: meta ? (meta as unknown as object) : undefined,
       items: { create: createdItems },
     },
@@ -312,7 +399,7 @@ r.post("/", async (req: Request, res: Response) => {
 });
 
 /* ============================================================================
-   READ helpers (handy for debugging)
+   READ helpers
 ============================================================================ */
 r.get("/by-no/:no", async (req: Request, res: Response) => {
   try {
@@ -321,7 +408,7 @@ r.get("/by-no/:no", async (req: Request, res: Response) => {
       where: { invoiceNo: req.params.no, tenantId },
       include: { client: true, items: true },
     });
-  if (!inv) return res.status(404).json({ ok: false, message: "Invoice not found" });
+    if (!inv) return res.status(404).json({ ok: false, message: "Invoice not found" });
     res.json({ ok: true, data: inv });
   } catch (e) {
     res.status(400).json({ ok: false, message: (e as Error).message });
@@ -344,7 +431,7 @@ r.get("/:id", async (req: Request, res: Response) => {
 });
 
 /* ============================================================================
-   GET /api/invoices/by-no/:no/pdf  -> supports ?doc=performa&force=1
+   PDFs
 ============================================================================ */
 r.get("/by-no/:no/pdf", async (req: Request, res: Response) => {
   try {
@@ -369,9 +456,6 @@ r.get("/by-no/:no/pdf", async (req: Request, res: Response) => {
   }
 });
 
-/* ============================================================================
-   GET /api/invoices/:idOrNo/pdf  -> id or invoiceNo, supports ?doc=performa&force=1
-============================================================================ */
 r.get("/:idOrNo/pdf", async (req: Request, res: Response) => {
   try {
     const idOrNo = req.params.idOrNo;
@@ -406,9 +490,6 @@ r.get("/:idOrNo/pdf", async (req: Request, res: Response) => {
   }
 });
 
-/* ============================================================================
-   PRETTY URLS for PROFORMA PDFs (no query params needed)
-============================================================================ */
 r.get("/:id/proforma.pdf", (req: Request, res: Response) => {
   const qs = new URLSearchParams({
     doc: "performa",
@@ -426,7 +507,7 @@ r.get("/by-no/:no/proforma.pdf", (req: Request, res: Response) => {
 });
 
 /* ============================================================================
-   EMAIL TAX INVOICE (ensures TAX PDF exists)
+   EMAIL TAX INVOICE
 ============================================================================ */
 r.post("/:id/email", async (req: Request, res: Response) => {
   const id = req.params.id;
@@ -456,6 +537,7 @@ r.post("/:id/email", async (req: Request, res: Response) => {
   }
 
   // Validate recipients
+  const EmailPayload = z.object({ to: z.array(z.string().email()).min(1) });
   let payload: z.infer<typeof EmailPayload>;
   try {
     payload = EmailPayload.parse(req.body);
@@ -478,12 +560,11 @@ r.post("/:id/email", async (req: Request, res: Response) => {
 });
 
 /* ============================================================================
-   SIMPLE STATUS ENDPOINTS (enum-safe)
+   SIMPLE STATUS ENDPOINTS
 ============================================================================ */
 async function setInvoiceStatus(id: string, status: InvoiceStatus) {
   const patch: Record<string, any> = { status };
   if (status === InvoiceStatus.SENT) {
-    // Optional: stamp issueDate on "issue/send"
     patch.issueDate = new Date();
   }
   return prisma.invoice.update({
