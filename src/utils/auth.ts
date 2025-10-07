@@ -11,8 +11,11 @@ import jwksClient, { type JwksClient } from 'jwks-rsa';
 const DISABLE_AUTH = /^true$/i.test(process.env.DISABLE_AUTH || '');
 const DEV_TENANT_ID = process.env.DEV_TENANT_ID || '';
 const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || '';
-const JWT_SECRET = process.env.JWT_SECRET || ''; // for HS256 tokens (email/password login)
+const JWT_SECRET = process.env.JWT_SECRET || ''; // HS256 (email/password flow)
 const COGNITO_AUDIENCE = process.env.COGNITO_AUDIENCE;
+
+// 🚩 match routes/auth.ts cookie name (defaults to "session")
+const COOKIE_NAME = process.env.COOKIE_NAME || 'session';
 
 const isObjectId = (s?: string) => !!s && /^[0-9a-f]{24}$/i.test(s);
 
@@ -33,7 +36,7 @@ function getJwksClient(): JwksClient | null {
     jwksUri: `${issuer}/.well-known/jwks.json`,
     cache: true,
     cacheMaxEntries: 5,
-    cacheMaxAge: 10 * 60 * 1000, // 10m
+    cacheMaxAge: 10 * 60 * 1000,
     rateLimit: true,
     jwksRequestsPerMinute: 10,
   });
@@ -61,10 +64,6 @@ export interface AuthedPayload extends JwtPayload {
 }
 
 /* -------------------------- Tenant Id enrichment -------------------------- */
-/**
- * Try to ensure a tenant id is present on the request user object.
- * Prefers header X-Tenant-Id, then DEFAULT_TENANT_ID, then DEV_TENANT_ID.
- */
 function ensureTenantId(req: Request, payload: AuthedPayload): AuthedPayload {
   if (isObjectId(payload['custom:tenantId'])) return payload;
 
@@ -81,16 +80,14 @@ function ensureTenantId(req: Request, payload: AuthedPayload): AuthedPayload {
     payload['custom:tenantId'] = DEV_TENANT_ID;
     return payload;
   }
-  // Leave missing; downstream will reject via resolveTenantId
   return payload;
 }
 
 /* ------------------------------- Open paths ------------------------------- */
 function isOpenPath(req: Request): boolean {
-  // server.ts mounts at /api, so here req.path is relative to /api
   if (req.method === 'OPTIONS') return true;
-  if (req.path === '/health') return true;       // /api/health is also mounted outside; safe guard
-  if (req.path.startsWith('/auth')) return true; // login/register/refresh etc
+  if (req.path === '/health') return true;
+  if (req.path.startsWith('/auth')) return true;
   return false;
 }
 
@@ -101,7 +98,7 @@ function parseCookies(raw?: string | null): Record<string, string> {
   raw.split(';').forEach((p) => {
     const [k, ...rest] = p.trim().split('=');
     if (!k) return;
-    const v = rest.join('='); // value may contain '='
+    const v = rest.join('=');
     try {
       out[decodeURIComponent(k)] = decodeURIComponent(v || '');
     } catch {
@@ -118,9 +115,10 @@ function extractToken(req: Request): string | null {
     return authz.replace(/^Bearer\s+/i, '').trim();
   }
 
-  // 2) Cookie: jwt | token | access_token | idToken
+  // 2) Cookie: prefer COOKIE_NAME (e.g., "session"), but also accept legacy names
   const cookies = parseCookies(req.headers.cookie || null);
   const cookieToken =
+    cookies[COOKIE_NAME] ||
     cookies.jwt ||
     cookies.token ||
     cookies.access_token ||
@@ -129,7 +127,7 @@ function extractToken(req: Request): string | null {
     '';
   if (cookieToken) return cookieToken.trim();
 
-  // 3) Query param ?token= (or ?jwt=/ ?access_token=)
+  // 3) Query param ?token= / ?jwt= / ?access_token=
   const qp =
     (req.query.token as string | undefined) ||
     (req.query.jwt as string | undefined) ||
@@ -154,20 +152,18 @@ export default function auth(req: Request, res: Response, next: NextFunction) {
     return next();
   }
 
-  // Extract token from header, cookie or query
   const token = extractToken(req);
   if (!token) {
-    return res.status(401).json({ ok: false, message: 'Missing Bearer token' });
+    return res.status(401).json({ ok: false, message: 'Missing token (Bearer or cookie)' });
   }
 
   const issuer = cognitoIssuer();
 
-  // HS256 (first-party) verification
+  // HS256 (first-party)
   if (JWT_SECRET) {
     const verifyOpts: jwt.VerifyOptions = {
       algorithms: ['HS256'],
       ...(COGNITO_AUDIENCE ? { audience: COGNITO_AUDIENCE } : {}),
-      // no issuer check for HS256 unless you set one when signing
     };
     jwt.verify(
       token,
@@ -210,7 +206,6 @@ export default function auth(req: Request, res: Response, next: NextFunction) {
     return;
   }
 
-  // No strategy configured
   return res.status(401).json({
     ok: false,
     message:
