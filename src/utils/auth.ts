@@ -8,14 +8,12 @@ import jwt, {
 } from 'jsonwebtoken';
 import jwksClient, { type JwksClient } from 'jwks-rsa';
 
-const DISABLE_AUTH = /^true$/i.test(process.env.DISABLE_AUTH || '');
-const DEV_TENANT_ID = process.env.DEV_TENANT_ID || '';
+const DISABLE_AUTH      = /^true$/i.test(process.env.DISABLE_AUTH || '');
+const DEV_TENANT_ID     = process.env.DEV_TENANT_ID || '';
 const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || '';
-const JWT_SECRET = process.env.JWT_SECRET || ''; // HS256 (email/password flow)
-const COGNITO_AUDIENCE = process.env.COGNITO_AUDIENCE;
-
-// 🚩 match routes/auth.ts cookie name (defaults to "session")
-const COOKIE_NAME = process.env.COOKIE_NAME || 'session';
+const JWT_SECRET        = process.env.JWT_SECRET || '';          // HS256 (first-party)
+const COGNITO_AUDIENCE  = process.env.COGNITO_AUDIENCE;
+const COOKIE_NAME       = process.env.COOKIE_NAME || 'session';  // << match auth router
 
 const isObjectId = (s?: string) => !!s && /^[0-9a-f]{24}$/i.test(s);
 
@@ -42,7 +40,6 @@ function getJwksClient(): JwksClient | null {
   });
   return jwks;
 }
-
 function getJwksKey(header: JwtHeader, cb: SigningKeyCallback) {
   const c = getJwksClient();
   if (!c) return cb(new Error('JWKS client not configured'));
@@ -86,8 +83,8 @@ function ensureTenantId(req: Request, payload: AuthedPayload): AuthedPayload {
 /* ------------------------------- Open paths ------------------------------- */
 function isOpenPath(req: Request): boolean {
   if (req.method === 'OPTIONS') return true;
-  if (req.path === '/health') return true;
-  if (req.path.startsWith('/auth')) return true;
+  if (req.path === '/health') return true;        // safety
+  if (req.path.startsWith('/auth')) return true;  // login/register/me/logout
   return false;
 }
 
@@ -95,15 +92,12 @@ function isOpenPath(req: Request): boolean {
 function parseCookies(raw?: string | null): Record<string, string> {
   const out: Record<string, string> = {};
   if (!raw) return out;
-  raw.split(';').forEach((p) => {
+  raw.split(';').forEach(p => {
     const [k, ...rest] = p.trim().split('=');
     if (!k) return;
     const v = rest.join('=');
-    try {
-      out[decodeURIComponent(k)] = decodeURIComponent(v || '');
-    } catch {
-      out[k] = v || '';
-    }
+    try { out[decodeURIComponent(k)] = decodeURIComponent(v || ''); }
+    catch { out[k] = v || ''; }
   });
   return out;
 }
@@ -111,11 +105,9 @@ function parseCookies(raw?: string | null): Record<string, string> {
 function extractToken(req: Request): string | null {
   // 1) Authorization: Bearer ...
   const authz = (req.headers.authorization as string) || (req.headers as any).Authorization;
-  if (authz && /^Bearer\s+/i.test(authz)) {
-    return authz.replace(/^Bearer\s+/i, '').trim();
-  }
+  if (authz && /^Bearer\s+/i.test(authz)) return authz.replace(/^Bearer\s+/i, '').trim();
 
-  // 2) Cookie: prefer COOKIE_NAME (e.g., "session"), but also accept legacy names
+  // 2) Cookie: honor configured COOKIE_NAME first, then common fallbacks
   const cookies = parseCookies(req.headers.cookie || null);
   const cookieToken =
     cookies[COOKIE_NAME] ||
@@ -127,7 +119,7 @@ function extractToken(req: Request): string | null {
     '';
   if (cookieToken) return cookieToken.trim();
 
-  // 3) Query param ?token= / ?jwt= / ?access_token=
+  // 3) Query params (very last resort)
   const qp =
     (req.query.token as string | undefined) ||
     (req.query.jwt as string | undefined) ||
@@ -141,7 +133,7 @@ function extractToken(req: Request): string | null {
 export default function auth(req: Request, res: Response, next: NextFunction) {
   if (isOpenPath(req)) return next();
 
-  // Local dev bypass
+  // Dev bypass
   if (DISABLE_AUTH) {
     (req as any).user = ensureTenantId(req, {
       sub: 'dev-user',
@@ -154,7 +146,7 @@ export default function auth(req: Request, res: Response, next: NextFunction) {
 
   const token = extractToken(req);
   if (!token) {
-    return res.status(401).json({ ok: false, message: 'Missing token (Bearer or cookie)' });
+    return res.status(401).json({ ok: false, message: 'Missing token (Bearer header or cookie)' });
   }
 
   const issuer = cognitoIssuer();
@@ -165,44 +157,30 @@ export default function auth(req: Request, res: Response, next: NextFunction) {
       algorithms: ['HS256'],
       ...(COGNITO_AUDIENCE ? { audience: COGNITO_AUDIENCE } : {}),
     };
-    jwt.verify(
-      token,
-      JWT_SECRET,
-      verifyOpts,
-      (err: VerifyErrors | null, decoded?: JwtPayload | string) => {
-        if (err) return res.status(401).json({ ok: false, message: 'Invalid token', error: err.message });
-        const payload: AuthedPayload =
-          typeof decoded === 'string'
-            ? (JSON.parse(decoded) as AuthedPayload)
-            : ((decoded as AuthedPayload) || {});
-        (req as any).user = ensureTenantId(req, payload);
-        return next();
-      }
-    );
+    jwt.verify(token, JWT_SECRET, verifyOpts, (err: VerifyErrors | null, decoded?: JwtPayload | string) => {
+      if (err) return res.status(401).json({ ok: false, message: 'Invalid token', error: err.message });
+      const payload: AuthedPayload =
+        typeof decoded === 'string' ? (JSON.parse(decoded) as AuthedPayload) : ((decoded as AuthedPayload) || {});
+      (req as any).user = ensureTenantId(req, payload);
+      return next();
+    });
     return;
   }
 
-  // RS256 (Cognito/OIDC) via JWKS
+  // RS256 (Cognito/OIDC)
   if (issuer) {
     const verifyOpts: jwt.VerifyOptions = {
       algorithms: ['RS256'],
       issuer,
       ...(COGNITO_AUDIENCE ? { audience: COGNITO_AUDIENCE } : {}),
     };
-    jwt.verify(
-      token,
-      getJwksKey,
-      verifyOpts,
-      (err: VerifyErrors | null, decoded?: JwtPayload | string) => {
-        if (err) return res.status(401).json({ ok: false, message: 'Invalid token', error: err.message });
-        const payload: AuthedPayload =
-          typeof decoded === 'string'
-            ? (JSON.parse(decoded) as AuthedPayload)
-            : ((decoded as AuthedPayload) || {});
-        (req as any).user = ensureTenantId(req, payload);
-        return next();
-      }
-    );
+    jwt.verify(token, getJwksKey, verifyOpts, (err: VerifyErrors | null, decoded?: JwtPayload | string) => {
+      if (err) return res.status(401).json({ ok: false, message: 'Invalid token', error: err.message });
+      const payload: AuthedPayload =
+        typeof decoded === 'string' ? (JSON.parse(decoded) as AuthedPayload) : ((decoded as AuthedPayload) || {});
+      (req as any).user = ensureTenantId(req, payload);
+      return next();
+    });
     return;
   }
 
