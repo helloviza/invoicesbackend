@@ -11,13 +11,13 @@ import jwksClient, { type JwksClient } from 'jwks-rsa';
 const DISABLE_AUTH      = /^true$/i.test(process.env.DISABLE_AUTH || '');
 const DEV_TENANT_ID     = process.env.DEV_TENANT_ID || '';
 const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || '';
-const JWT_SECRET        = process.env.JWT_SECRET || '';          // HS256 (first-party)
+const JWT_SECRET        = process.env.JWT_SECRET || '';          // HS256 verify
 const COGNITO_AUDIENCE  = process.env.COGNITO_AUDIENCE;
-const COOKIE_NAME       = process.env.COOKIE_NAME || 'session';  // << match auth router
+const COOKIE_NAME       = process.env.COOKIE_NAME || 'session';  // matches /api/auth/login
 
 const isObjectId = (s?: string) => !!s && /^[0-9a-f]{24}$/i.test(s);
 
-/* ------------------------------ Cognito/JWKS ------------------------------ */
+/* ------------------ JWKS (Cognito/OIDC) ------------------ */
 function cognitoIssuer(): string | undefined {
   if (process.env.COGNITO_ISSUER) return process.env.COGNITO_ISSUER;
   const region = process.env.COGNITO_REGION;
@@ -52,7 +52,7 @@ function getJwksKey(header: JwtHeader, cb: SigningKeyCallback) {
   });
 }
 
-/* --------------------------------- Types ---------------------------------- */
+/* ----------------------------- Types ----------------------------- */
 export interface AuthedPayload extends JwtPayload {
   sub?: string;
   email?: string;
@@ -60,40 +60,31 @@ export interface AuthedPayload extends JwtPayload {
   'custom:tenantId'?: string;
 }
 
-/* -------------------------- Tenant Id enrichment -------------------------- */
+/* ---------------------- Tenant enrichment ----------------------- */
 function ensureTenantId(req: Request, payload: AuthedPayload): AuthedPayload {
   if (isObjectId(payload['custom:tenantId'])) return payload;
 
   const headerTid = req.header('x-tenant-id') || req.header('X-Tenant-Id') || '';
-  if (isObjectId(headerTid)) {
-    payload['custom:tenantId'] = headerTid;
-    return payload;
-  }
-  if (isObjectId(DEFAULT_TENANT_ID)) {
-    payload['custom:tenantId'] = DEFAULT_TENANT_ID;
-    return payload;
-  }
-  if (isObjectId(DEV_TENANT_ID)) {
-    payload['custom:tenantId'] = DEV_TENANT_ID;
-    return payload;
-  }
+  if (isObjectId(headerTid)) return Object.assign(payload, { 'custom:tenantId': headerTid });
+  if (isObjectId(DEFAULT_TENANT_ID)) return Object.assign(payload, { 'custom:tenantId': DEFAULT_TENANT_ID });
+  if (isObjectId(DEV_TENANT_ID)) return Object.assign(payload, { 'custom:tenantId': DEV_TENANT_ID });
   return payload;
 }
 
-/* ------------------------------- Open paths ------------------------------- */
+/* ---------------------------- Open paths ---------------------------- */
 function isOpenPath(req: Request): boolean {
   if (req.method === 'OPTIONS') return true;
-  if (req.path === '/health') return true;        // safety
-  if (req.path.startsWith('/auth')) return true;  // login/register/me/logout
+  if (req.path === '/health') return true;
+  if (req.path.startsWith('/auth')) return true; // /api/auth/*
   return false;
 }
 
-/* --------------------------- Token extraction ----------------------------- */
-function parseCookies(raw?: string | null): Record<string, string> {
-  const out: Record<string, string> = {};
+/* ---------------------- Token extraction ---------------------- */
+function parseCookies(raw?: string | null): Record<string,string> {
+  const out: Record<string,string> = {};
   if (!raw) return out;
-  raw.split(';').forEach(p => {
-    const [k, ...rest] = p.trim().split('=');
+  raw.split(';').forEach(part => {
+    const [k, ...rest] = part.trim().split('=');
     if (!k) return;
     const v = rest.join('=');
     try { out[decodeURIComponent(k)] = decodeURIComponent(v || ''); }
@@ -101,13 +92,12 @@ function parseCookies(raw?: string | null): Record<string, string> {
   });
   return out;
 }
-
 function extractToken(req: Request): string | null {
-  // 1) Authorization: Bearer ...
+  // 1) Authorization header
   const authz = (req.headers.authorization as string) || (req.headers as any).Authorization;
   if (authz && /^Bearer\s+/i.test(authz)) return authz.replace(/^Bearer\s+/i, '').trim();
 
-  // 2) Cookie: honor configured COOKIE_NAME first, then common fallbacks
+  // 2) Our cookie name, then common fallbacks
   const cookies = parseCookies(req.headers.cookie || null);
   const cookieToken =
     cookies[COOKIE_NAME] ||
@@ -119,7 +109,7 @@ function extractToken(req: Request): string | null {
     '';
   if (cookieToken) return cookieToken.trim();
 
-  // 3) Query params (very last resort)
+  // 3) Optional query param
   const qp =
     (req.query.token as string | undefined) ||
     (req.query.jwt as string | undefined) ||
@@ -129,11 +119,10 @@ function extractToken(req: Request): string | null {
   return null;
 }
 
-/* -------------------------------- Middleware ------------------------------ */
+/* --------------------------- Middleware --------------------------- */
 export default function auth(req: Request, res: Response, next: NextFunction) {
   if (isOpenPath(req)) return next();
 
-  // Dev bypass
   if (DISABLE_AUTH) {
     (req as any).user = ensureTenantId(req, {
       sub: 'dev-user',
@@ -146,7 +135,7 @@ export default function auth(req: Request, res: Response, next: NextFunction) {
 
   const token = extractToken(req);
   if (!token) {
-    return res.status(401).json({ ok: false, message: 'Missing token (Bearer header or cookie)' });
+    return res.status(401).json({ ok: false, message: 'Missing token (Authorization header or session cookie)' });
   }
 
   const issuer = cognitoIssuer();
@@ -167,7 +156,7 @@ export default function auth(req: Request, res: Response, next: NextFunction) {
     return;
   }
 
-  // RS256 (Cognito/OIDC)
+  // RS256 (Cognito / OIDC)
   if (issuer) {
     const verifyOpts: jwt.VerifyOptions = {
       algorithms: ['RS256'],
