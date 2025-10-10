@@ -1,23 +1,19 @@
 ﻿// apps/backend/src/utils/auth.ts
 import type { Request, Response, NextFunction } from 'express';
-import jwt, {
-  type JwtPayload,
-  type VerifyErrors,
-  type JwtHeader,
-  type SigningKeyCallback,
-} from 'jsonwebtoken';
+import jwt, { type JwtPayload, type VerifyErrors, type JwtHeader, type SigningKeyCallback } from 'jsonwebtoken';
 import jwksClient, { type JwksClient } from 'jwks-rsa';
 
-const DISABLE_AUTH      = /^true$/i.test(process.env.DISABLE_AUTH || '');
-const DEV_TENANT_ID     = process.env.DEV_TENANT_ID || '';
-const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || '';
-const JWT_SECRET        = process.env.JWT_SECRET || '';          // HS256 verify
-const COGNITO_AUDIENCE  = process.env.COGNITO_AUDIENCE;
-const COOKIE_NAME       = process.env.COOKIE_NAME || 'session';  // matches /api/auth/login
+const DISABLE_AUTH     = /^true$/i.test(process.env.DISABLE_AUTH || '');
+const DEV_TENANT_ID    = process.env.DEV_TENANT_ID || '';
+const DEFAULT_TENANT_ID= process.env.DEFAULT_TENANT_ID || '';
+const JWT_SECRET       = process.env.JWT_SECRET || ''; // HS256 signing secret
+const COGNITO_AUDIENCE = process.env.COGNITO_AUDIENCE;
+const COOKIE_NAME      = process.env.COOKIE_NAME || 'session';
 
 const isObjectId = (s?: string) => !!s && /^[0-9a-f]{24}$/i.test(s);
+const looksJwt    = (s?: string | null) => !!s && typeof s === 'string' && s.split('.').length === 3;
 
-/* ------------------ JWKS (Cognito/OIDC) ------------------ */
+/* ------------------------------ Cognito/JWKS ------------------------------ */
 function cognitoIssuer(): string | undefined {
   if (process.env.COGNITO_ISSUER) return process.env.COGNITO_ISSUER;
   const region = process.env.COGNITO_REGION;
@@ -52,7 +48,7 @@ function getJwksKey(header: JwtHeader, cb: SigningKeyCallback) {
   });
 }
 
-/* ----------------------------- Types ----------------------------- */
+/* --------------------------------- Types ---------------------------------- */
 export interface AuthedPayload extends JwtPayload {
   sub?: string;
   email?: string;
@@ -60,31 +56,30 @@ export interface AuthedPayload extends JwtPayload {
   'custom:tenantId'?: string;
 }
 
-/* ---------------------- Tenant enrichment ----------------------- */
+/* -------------------------- Tenant Id enrichment -------------------------- */
 function ensureTenantId(req: Request, payload: AuthedPayload): AuthedPayload {
   if (isObjectId(payload['custom:tenantId'])) return payload;
-
   const headerTid = req.header('x-tenant-id') || req.header('X-Tenant-Id') || '';
-  if (isObjectId(headerTid)) return Object.assign(payload, { 'custom:tenantId': headerTid });
-  if (isObjectId(DEFAULT_TENANT_ID)) return Object.assign(payload, { 'custom:tenantId': DEFAULT_TENANT_ID });
-  if (isObjectId(DEV_TENANT_ID)) return Object.assign(payload, { 'custom:tenantId': DEV_TENANT_ID });
+  if (isObjectId(headerTid)) { payload['custom:tenantId'] = headerTid; return payload; }
+  if (isObjectId(DEFAULT_TENANT_ID)) { payload['custom:tenantId'] = DEFAULT_TENANT_ID; return payload; }
+  if (isObjectId(DEV_TENANT_ID)) { payload['custom:tenantId'] = DEV_TENANT_ID; return payload; }
   return payload;
 }
 
-/* ---------------------------- Open paths ---------------------------- */
+/* ------------------------------- Open paths ------------------------------- */
 function isOpenPath(req: Request): boolean {
   if (req.method === 'OPTIONS') return true;
   if (req.path === '/health') return true;
-  if (req.path.startsWith('/auth')) return true; // /api/auth/*
+  if (req.path.startsWith('/auth')) return true;
   return false;
 }
 
-/* ---------------------- Token extraction ---------------------- */
-function parseCookies(raw?: string | null): Record<string,string> {
-  const out: Record<string,string> = {};
+/* --------------------------- Token extraction ----------------------------- */
+function parseCookies(raw?: string | null): Record<string, string> {
+  const out: Record<string, string> = {};
   if (!raw) return out;
-  raw.split(';').forEach(part => {
-    const [k, ...rest] = part.trim().split('=');
+  raw.split(';').forEach((p) => {
+    const [k, ...rest] = p.trim().split('=');
     if (!k) return;
     const v = rest.join('=');
     try { out[decodeURIComponent(k)] = decodeURIComponent(v || ''); }
@@ -92,24 +87,27 @@ function parseCookies(raw?: string | null): Record<string,string> {
   });
   return out;
 }
+function cookieToken(req: Request): string | null {
+  const c = parseCookies(req.headers.cookie || null);
+  return (c[COOKIE_NAME] || c.jwt || c.token || c.access_token || c.idToken || c.IDToken || '').trim() || null;
+}
+
+/**
+ * Prefer cookie (stable across tabs) and only fall back to Authorization header
+ * if there is no cookie OR the header looks like a real JWT and the cookie is missing.
+ */
 function extractToken(req: Request): string | null {
-  // 1) Authorization header
+  const cTok = cookieToken(req);
   const authz = (req.headers.authorization as string) || (req.headers as any).Authorization;
-  if (authz && /^Bearer\s+/i.test(authz)) return authz.replace(/^Bearer\s+/i, '').trim();
 
-  // 2) Our cookie name, then common fallbacks
-  const cookies = parseCookies(req.headers.cookie || null);
-  const cookieToken =
-    cookies[COOKIE_NAME] ||
-    cookies.jwt ||
-    cookies.token ||
-    cookies.access_token ||
-    cookies.idToken ||
-    cookies.IDToken ||
-    '';
-  if (cookieToken) return cookieToken.trim();
+  if (cTok) return cTok;                         // ⬅️ cookie wins
 
-  // 3) Optional query param
+  if (authz && /^Bearer\s+/i.test(authz)) {
+    const t = authz.replace(/^Bearer\s+/i, '').trim();
+    if (looksJwt(t)) return t;
+  }
+
+  // query fallback
   const qp =
     (req.query.token as string | undefined) ||
     (req.query.jwt as string | undefined) ||
@@ -119,10 +117,11 @@ function extractToken(req: Request): string | null {
   return null;
 }
 
-/* --------------------------- Middleware --------------------------- */
+/* -------------------------------- Middleware ------------------------------ */
 export default function auth(req: Request, res: Response, next: NextFunction) {
   if (isOpenPath(req)) return next();
 
+  // Dev bypass
   if (DISABLE_AUTH) {
     (req as any).user = ensureTenantId(req, {
       sub: 'dev-user',
@@ -135,12 +134,12 @@ export default function auth(req: Request, res: Response, next: NextFunction) {
 
   const token = extractToken(req);
   if (!token) {
-    return res.status(401).json({ ok: false, message: 'Missing token (Authorization header or session cookie)' });
+    return res.status(401).json({ ok: false, message: 'Missing Bearer token' });
   }
 
   const issuer = cognitoIssuer();
 
-  // HS256 (first-party)
+  // HS256 first-party
   if (JWT_SECRET) {
     const verifyOpts: jwt.VerifyOptions = {
       algorithms: ['HS256'],
@@ -156,7 +155,7 @@ export default function auth(req: Request, res: Response, next: NextFunction) {
     return;
   }
 
-  // RS256 (Cognito / OIDC)
+  // RS256 (Cognito/OIDC)
   if (issuer) {
     const verifyOpts: jwt.VerifyOptions = {
       algorithms: ['RS256'],
