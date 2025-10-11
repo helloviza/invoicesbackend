@@ -5,34 +5,47 @@ import bcrypt from "bcryptjs";
 const prisma = new PrismaClient();
 const router = Router();
 
-// password policy: 6â€“18, 1 upper, 1 lower, 1 digit, 1 special, no spaces
+// password policy: 6–18, 1 upper, 1 lower, 1 digit, 1 special, no spaces
 const PASSWORD_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9])[^\s]{6,18}$/;
 
+/* -------------------------------------------------------------------------- */
+/*                        Allow admin or DISABLE_AUTH=true                    */
+/* -------------------------------------------------------------------------- */
 function ensureAdmin(req: Request, res: Response, next: NextFunction) {
-  const role = (req as any)?.user?.role || (req as any)?.auth?.role;
-  if (String(role).toLowerCase() !== "admin") {
-    return res.status(403).json({ ok: false, message: "Admin only" });
+  const role = (req as any)?.user?.role || (req as any)?.auth?.role || "";
+  const devBypass = process.env.DISABLE_AUTH === "true";
+  if (devBypass || String(role).toLowerCase() === "admin" || String(role).toLowerCase() === "owner") {
+    return next();
   }
-  next();
+  return res.status(403).json({ ok: false, message: "Admin only" });
 }
 
+/* -------------------------------------------------------------------------- */
+/*                             Normalizer helper                              */
+/* -------------------------------------------------------------------------- */
 function normalizeUser(u: any) {
+  const roleRaw = String(u.role ?? "").toLowerCase();
+  const role = roleRaw === "viewer" ? "staff" : roleRaw;
   return {
     id: String(u.id ?? u._id ?? ""),
     email: String(u.email ?? ""),
     name: u.name ?? u.fullName ?? u.displayName ?? "",
-    role: String(u.role ?? (u.isAdmin ? "admin" : "staff")).toLowerCase(),
+    role,
     isActive: (u.isActive ?? u.active ?? u.enabled ?? true) ? true : false,
     createdAt: u.createdAt ?? null,
     lastLoginAt: u.lastLoginAt ?? null,
   };
 }
 
+/* -------------------------------------------------------------------------- */
+/*                                Routes                                      */
+/* -------------------------------------------------------------------------- */
+
 // GET /api/users
 router.get("/", ensureAdmin, async (_req, res) => {
   try {
-    // fetch all fields, then normalize (avoids select errors across schemas)
-    const rows: any[] = await (prisma as any).user.findMany({});
+    // use your real model name: userProfile
+    const rows: any[] = await (prisma as any).userProfile.findMany({});
     res.json(rows.map(normalizeUser));
   } catch (e: any) {
     console.error("users list failed:", e);
@@ -40,7 +53,7 @@ router.get("/", ensureAdmin, async (_req, res) => {
   }
 });
 
-// POST /api/users  { name?, email, role: 'admin'|'staff', password }
+// POST /api/users
 router.post("/", ensureAdmin, async (req, res) => {
   try {
     const { name, email, role, password } = req.body || {};
@@ -54,12 +67,15 @@ router.post("/", ensureAdmin, async (req, res) => {
     if (!PASSWORD_RE.test(String(password || ""))) {
       return res.status(400).json({ ok: false, message: "Password does not meet policy" });
     }
-    const existing = await (prisma as any).user.findFirst({ where: { email: email.toLowerCase() } });
+
+    const existing = await (prisma as any).userProfile.findFirst({
+      where: { email: email.toLowerCase() },
+    });
     if (existing) return res.status(409).json({ ok: false, message: "Email already in use" });
 
     const passwordHash = await bcrypt.hash(String(password), 10);
 
-    const created = await (prisma as any).user.create({
+    const created = await (prisma as any).userProfile.create({
       data: {
         email: email.toLowerCase(),
         name: name || null,
@@ -76,27 +92,7 @@ router.post("/", ensureAdmin, async (req, res) => {
   }
 });
 
-// POST /api/users/:id/reset-password  { password }
-router.post("/:id/reset-password", ensureAdmin, async (req, res) => {
-  try {
-    const id = String(req.params.id);
-    const { password } = req.body || {};
-    if (!PASSWORD_RE.test(String(password || ""))) {
-      return res.status(400).json({ ok: false, message: "Password does not meet policy" });
-    }
-    const passwordHash = await bcrypt.hash(String(password), 10);
-    const updated = await (prisma as any).user.update({
-      where: { id },
-      data: { passwordHash },
-    });
-    res.json({ ok: true, user: normalizeUser(updated) });
-  } catch (e: any) {
-    console.error("reset password failed:", e);
-    res.status(500).json({ ok: false, message: "Reset failed" });
-  }
-});
-
-// PATCH /api/users/:id  { role?, isActive?, password? }  (password path kept for flexibility)
+// PATCH /api/users/:id
 router.patch("/:id", ensureAdmin, async (req, res) => {
   try {
     const id = String(req.params.id);
@@ -118,7 +114,7 @@ router.patch("/:id", ensureAdmin, async (req, res) => {
       data.passwordHash = await bcrypt.hash(String(password), 10);
     }
 
-    const updated = await (prisma as any).user.update({ where: { id }, data });
+    const updated = await (prisma as any).userProfile.update({ where: { id }, data });
     res.json(normalizeUser(updated));
   } catch (e: any) {
     console.error("user patch failed:", e);
