@@ -1,6 +1,7 @@
 ﻿import { Router, type Request, type Response, type NextFunction } from "express";
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import { randomUUID } from "crypto";
 
 const prisma = new PrismaClient();
 const router = Router();
@@ -14,7 +15,11 @@ const PASSWORD_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9])[^\s]{6,18
 function ensureAdmin(req: Request, res: Response, next: NextFunction) {
   const role = (req as any)?.user?.role || (req as any)?.auth?.role || "";
   const devBypass = process.env.DISABLE_AUTH === "true";
-  if (devBypass || String(role).toLowerCase() === "admin" || String(role).toLowerCase() === "owner") {
+  if (
+    devBypass ||
+    String(role).toLowerCase() === "admin" ||
+    String(role).toLowerCase() === "owner"
+  ) {
     return next();
   }
   return res.status(403).json({ ok: false, message: "Admin only" });
@@ -44,7 +49,6 @@ function normalizeUser(u: any) {
 // GET /api/users
 router.get("/", ensureAdmin, async (_req, res) => {
   try {
-    // use your real model name: userProfile
     const rows: any[] = await (prisma as any).userProfile.findMany({});
     res.json(rows.map(normalizeUser));
   } catch (e: any) {
@@ -60,35 +64,51 @@ router.post("/", ensureAdmin, async (req, res) => {
     if (!email || typeof email !== "string") {
       return res.status(400).json({ ok: false, message: "email required" });
     }
+
     const roleNorm = String(role || "staff").toLowerCase();
     if (!["admin", "staff"].includes(roleNorm)) {
       return res.status(400).json({ ok: false, message: "invalid role" });
     }
+
     if (!PASSWORD_RE.test(String(password || ""))) {
-      return res.status(400).json({ ok: false, message: "Password does not meet policy" });
+      return res
+        .status(400)
+        .json({ ok: false, message: "Password does not meet policy" });
     }
 
     const existing = await (prisma as any).userProfile.findFirst({
       where: { email: email.toLowerCase() },
     });
-    if (existing) return res.status(409).json({ ok: false, message: "Email already in use" });
+    if (existing)
+      return res
+        .status(409)
+        .json({ ok: false, message: "Email already in use" });
 
     const passwordHash = await bcrypt.hash(String(password), 10);
 
+    // 👇 generate required sub
+    const sub = randomUUID();
+
     const created = await (prisma as any).userProfile.create({
       data: {
+        sub,
         email: email.toLowerCase(),
         name: name || null,
         role: roleNorm,
         isActive: true,
         passwordHash,
+        tenantId: process.env.DEFAULT_TENANT_ID || null,
       },
     });
 
     res.json(normalizeUser(created));
   } catch (e: any) {
     console.error("user create failed:", e);
-    res.status(500).json({ ok: false, message: "Create failed" });
+    res.status(500).json({
+      ok: false,
+      message: "Create failed",
+      detail: e?.message || "unknown",
+    });
   }
 });
 
@@ -107,14 +127,20 @@ router.patch("/:id", ensureAdmin, async (req, res) => {
       data.role = roleNorm;
     }
     if (typeof isActive === "boolean") data.isActive = !!isActive;
+
     if (password !== undefined) {
       if (!PASSWORD_RE.test(String(password || ""))) {
-        return res.status(400).json({ ok: false, message: "Password does not meet policy" });
+        return res
+          .status(400)
+          .json({ ok: false, message: "Password does not meet policy" });
       }
       data.passwordHash = await bcrypt.hash(String(password), 10);
     }
 
-    const updated = await (prisma as any).userProfile.update({ where: { id }, data });
+    const updated = await (prisma as any).userProfile.update({
+      where: { id },
+      data,
+    });
     res.json(normalizeUser(updated));
   } catch (e: any) {
     console.error("user patch failed:", e);
