@@ -1,5 +1,4 @@
-﻿// src/server.ts
-import 'dotenv/config';
+﻿import 'dotenv/config';
 import express, { type Request, type Response, type NextFunction } from 'express';
 import cors, { type CorsOptions } from 'cors';
 import helmet from 'helmet';
@@ -43,19 +42,19 @@ const LOCALHOSTS = new Set([
 ]);
 
 const allowOrigin = (origin?: string) => {
-  if (!origin) return true; // same-origin / server-to-server
+  if (!origin) return true;
   if (FRONTEND_ORIGINS_ENV.includes(origin)) return true;
   try {
     const u = new URL(origin);
     if (u.protocol === 'https:' && /\.plumtrips\.com$/i.test(u.hostname)) return true;
     if (NODE_ENV !== 'production' && LOCALHOSTS.has(origin)) return true;
   } catch {
-    /* ignore bad origins */
+    /* ignore */
   }
   return false;
 };
 
-// Trust proxy for secure cookies behind ALB/App Runner
+// trust proxy for secure cookies behind ALB/App Runner
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
@@ -63,7 +62,7 @@ app.disable('x-powered-by');
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
 /* ----------------------------------------------------------------------------
- * Permissive CORS (reflect origin; let cors() mirror headers)
+ * Permissive CORS
  * --------------------------------------------------------------------------*/
 const corsOptions: CorsOptions = {
   origin(origin, cb) {
@@ -71,7 +70,6 @@ const corsOptions: CorsOptions = {
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  // undefined -> cors mirrors Access-Control-Request-Headers automatically
   allowedHeaders: undefined,
   exposedHeaders: ['Content-Disposition'],
   optionsSuccessStatus: 204,
@@ -120,7 +118,7 @@ app.get('/api/health', async (_req, res) => {
 app.use('/api/auth', authRouter);
 
 /* ----------------------------------------------------------------------------
- * Auth protect everything under /api (except above)
+ * Auth protect everything else under /api
  * --------------------------------------------------------------------------*/
 app.use('/api', authMiddleware);
 
@@ -128,16 +126,19 @@ app.use('/api', authMiddleware);
  * Protected routes
  * --------------------------------------------------------------------------*/
 app.use('/api/clients', clientsRouter);
-app.use('/api/invoices', invoicesRouter);      // main invoices CRUD/PDF
-app.use('/api/invoices', invoiceExports);      // exports + extra PDF routes
+
+// 🧩 Exports (CSV / XLSX / Combined PDF) — must come BEFORE main invoices CRUD
+app.use('/api/invoices', invoiceExports);
+
+// 📄 Main invoices CRUD / single PDF endpoints
+app.use('/api/invoices', invoicesRouter);
+
 app.use('/api/dashboard', dashboardRouter);
 app.use('/api', importPreviewRouter);
 app.use('/api/users', usersRouter);
 
 /* ----------------------------------------------------------------------------
- * Compat: POST /api/invoices/search & /list -> list endpoint
- *   - tenant optional (single-tenant OK if DEFAULT_TENANT_ID set)
- *   - uses conservative field names to avoid Prisma type errors
+ * Compat: POST /api/invoices/search & /list
  * --------------------------------------------------------------------------*/
 const isObjectId = (s?: string) => !!s && /^[0-9a-f]{24}$/i.test(s);
 
@@ -153,40 +154,32 @@ function resolveTenantIdFromReq(req: Request): string | null {
 
 async function listInvoices(req: Request, res: Response) {
   try {
-    const tenantId = resolveTenantIdFromReq(req); // may be null (single-tenant)
-
-    const page  = Math.max(1, parseInt(String(req.query.page || req.body?.page || '1'), 10));
+    const tenantId = resolveTenantIdFromReq(req);
+    const page = Math.max(1, parseInt(String(req.query.page || req.body?.page || '1'), 10));
     const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit || req.body?.limit || '50'), 10)));
-    const skip  = (page - 1) * limit;
+    const skip = (page - 1) * limit;
 
-    // Tolerant filters (keep only fields that usually exist)
-    const q           = (req.query.q || req.body?.q || '').toString().trim();
-    const clientId    = (req.query.billToId || req.body?.billToId || '').toString().trim();
+    const q = (req.query.q || req.body?.q || '').toString().trim();
+    const clientId = (req.query.billToId || req.body?.billToId || '').toString().trim();
     const dateFromISO = (req.query.dateFrom || req.body?.dateFrom || '').toString().trim();
-    const dateToISO   = (req.query.dateTo   || req.body?.dateTo   || '').toString().trim();
-    const status      = (req.query.status   || req.body?.status   || '').toString().trim().toUpperCase();
-    const docTypeIn   = (req.query.docType  || req.body?.docType  || '').toString().trim().toLowerCase();
-    const isProforma  = req.query.isProforma ?? req.body?.isProforma;
+    const dateToISO = (req.query.dateTo || req.body?.dateTo || '').toString().trim();
+    const status = (req.query.status || req.body?.status || '').toString().trim().toUpperCase();
+    const docTypeIn = (req.query.docType || req.body?.docType || '').toString().trim().toLowerCase();
+    const isProforma = req.query.isProforma ?? req.body?.isProforma;
 
-    // Build where (as any to avoid TS errors across schema variants)
     const where: any = {};
     if (tenantId) where.tenantId = tenantId;
-
-    if (q) {
-      // only invoiceNo to avoid schema differences (remove ORs that caused TS errors)
-      where.invoiceNo = { contains: q, mode: 'insensitive' };
-    }
-
+    if (q) where.invoiceNo = { contains: q, mode: 'insensitive' };
     if (clientId) where.clientId = clientId;
 
     if (dateFromISO || dateToISO) {
       where.issueDate = {};
       if (dateFromISO) where.issueDate.gte = new Date(dateFromISO);
-      if (dateToISO)   where.issueDate.lte = new Date(dateToISO);
+      if (dateToISO) where.issueDate.lte = new Date(dateToISO);
     }
 
-    if (status)  where.status  = status;                         // e.g. DRAFT/SENT/PAID/VOID
-    if (docTypeIn) where.docType = docTypeIn;                    // if you store 'invoice'/'performa'
+    if (status) where.status = status;
+    if (docTypeIn) where.docType = docTypeIn;
     if (typeof isProforma === 'boolean') where.isProforma = isProforma;
 
     const orderBy = { createdAt: 'desc' as const };
@@ -208,7 +201,7 @@ async function listInvoices(req: Request, res: Response) {
 }
 
 app.post('/api/invoices/search', listInvoices);
-app.post('/api/invoices/list',   listInvoices);
+app.post('/api/invoices/list', listInvoices);
 
 /* ----------------------------------------------------------------------------
  * 404 + error handler
@@ -240,4 +233,6 @@ async function shutdown(signal: NodeJS.Signals) {
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
-process.on('unhandledRejection', (reason) => { console.error('🚨 Unhandled Rejection:', reason); });
+process.on('unhandledRejection', (reason) => {
+  console.error('🚨 Unhandled Rejection:', reason);
+});
