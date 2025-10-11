@@ -1,0 +1,157 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  MANAGER
+  VIEWER
+}
+
+enum ServiceType {
+  FLIGHTS
+  HOTELS
+  HOLIDAYS
+  VISAS
+  MICE
+  STATIONERY
+  GIFT_ITEMS
+  GOODIES
+  OTHER
+}
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PAID
+  VOID
+}
+
+model Tenant {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users    UserProfile[]
+  clients  Client[]
+  invoices Invoice[]
+  counters InvoiceCounter[]
+}
+
+model UserProfile {
+  id    String  @id @default(auto()) @map("_id") @db.ObjectId
+  sub   String  @unique
+
+  // Login identity
+  email        String  @unique
+  username     String? @unique
+  passwordHash String? // bcrypt hash (null if using external auth only)
+
+  name  String?
+  role  Role    @default(VIEWER)
+
+  tenantId String @db.ObjectId
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Client {
+  id       String  @id @default(auto()) @map("_id") @db.ObjectId
+  tenantId String  @db.ObjectId
+  tenant   Tenant  @relation(fields: [tenantId], references: [id])
+
+  name     String
+  email    String?
+  phone    String?
+
+  // Optional free-text (legacy) address
+  address  String?
+
+  // Structured Bill-To payload used by routes/clients.ts
+  // { gstin, pan, website, logoUrl, address: { line1, line2, city, state, postalCode, country } }
+  meta     Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  invoices  Invoice[]
+
+  @@index([tenantId, name])
+  @@index([tenantId, createdAt])
+}
+
+model Invoice {
+  id          String        @id @default(auto()) @map("_id") @db.ObjectId
+  tenantId    String        @db.ObjectId
+  tenant      Tenant        @relation(fields: [tenantId], references: [id])
+
+  clientId    String        @db.ObjectId
+  client      Client        @relation(fields: [clientId], references: [id])
+
+  invoiceNo   String
+  issueDate   DateTime
+  dueDate     DateTime?
+  status      InvoiceStatus @default(DRAFT)
+  serviceType ServiceType
+
+  currency     String  @default("INR")
+  baseCurrency String  @default("INR")
+  fxRate       String? // rate as string (e.g., "1.000000")
+
+  items InvoiceItem[]
+
+  subtotal       String @default("0.00")
+  taxTotal       String @default("0.00")
+  serviceCharges String @default("0.00")
+  grandTotal     String @default("0.00")
+
+  notes         String?
+  pdfKey        String?
+  createdById   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  signatureJson Json?
+}
+
+model InvoiceItem {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  invoiceId   String   @db.ObjectId
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id])
+
+  sNo           Int
+  description   String?
+  quantity      String?  // store as string "2.0000" if needed
+  unitPrice     String?  // "1999.00"
+  tax           String?  @default("0.00")
+  serviceCharge String?  @default("0.00")
+
+  details   Json
+  lineTotal String @default("0.00")
+}
+
+model InvoiceCounter {
+  id       String  @id @default(auto()) @map("_id") @db.ObjectId
+  tenantId String  @db.ObjectId
+  tenant   Tenant  @relation(fields: [tenantId], references: [id])
+  yyyymmdd String
+  lastSeq  Int     @default(0)
+
+  @@unique([tenantId, yyyymmdd])
+}
+
+model ExchangeRate {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  fromCurrency String
+  toCurrency   String
+  rate         String   // e.g., "83.123456"
+  asOfDate     DateTime @default(now())
+}
