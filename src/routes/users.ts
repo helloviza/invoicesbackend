@@ -1,12 +1,12 @@
 ﻿import { Router, type Request, type Response, type NextFunction } from "express";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, Role } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { randomUUID } from "crypto";
 
 const prisma = new PrismaClient();
 const router = Router();
 
-// password policy: 6–18, 1 upper, 1 lower, 1 digit, 1 special, no spaces
+// password policy: 6–18 chars, 1 upper, 1 lower, 1 digit, 1 special, no spaces
 const PASSWORD_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9])[^\s]{6,18}$/;
 
 /* -------------------------------------------------------------------------- */
@@ -29,16 +29,14 @@ function ensureAdmin(req: Request, res: Response, next: NextFunction) {
 /*                             Normalizer helper                              */
 /* -------------------------------------------------------------------------- */
 function normalizeUser(u: any) {
-  const roleRaw = String(u.role ?? "").toLowerCase();
-  const role = roleRaw === "viewer" ? "staff" : roleRaw;
   return {
     id: String(u.id ?? u._id ?? ""),
     email: String(u.email ?? ""),
-    name: u.name ?? u.fullName ?? u.displayName ?? "",
-    role,
-    isActive: (u.isActive ?? u.active ?? u.enabled ?? true) ? true : false,
+    name: u.name ?? "",
+    role: String(u.role ?? "").toLowerCase(),
+    tenantId: u.tenantId ?? null,
     createdAt: u.createdAt ?? null,
-    lastLoginAt: u.lastLoginAt ?? null,
+    updatedAt: u.updatedAt ?? null,
   };
 }
 
@@ -49,7 +47,7 @@ function normalizeUser(u: any) {
 // GET /api/users
 router.get("/", ensureAdmin, async (_req, res) => {
   try {
-    const rows: any[] = await (prisma as any).userProfile.findMany({});
+    const rows = await prisma.userProfile.findMany();
     res.json(rows.map(normalizeUser));
   } catch (e: any) {
     console.error("users list failed:", e);
@@ -61,22 +59,22 @@ router.get("/", ensureAdmin, async (_req, res) => {
 router.post("/", ensureAdmin, async (req, res) => {
   try {
     const { name, email, role, password } = req.body || {};
+
     if (!email || typeof email !== "string") {
       return res.status(400).json({ ok: false, message: "email required" });
     }
-
-    const roleNorm = String(role || "staff").toLowerCase();
-    if (!["admin", "staff"].includes(roleNorm)) {
-      return res.status(400).json({ ok: false, message: "invalid role" });
-    }
-
     if (!PASSWORD_RE.test(String(password || ""))) {
       return res
         .status(400)
         .json({ ok: false, message: "Password does not meet policy" });
     }
 
-    const existing = await (prisma as any).userProfile.findFirst({
+    const roleNorm = String(role || "viewer").toLowerCase();
+    if (!["admin", "manager", "viewer"].includes(roleNorm)) {
+      return res.status(400).json({ ok: false, message: "invalid role" });
+    }
+
+    const existing = await prisma.userProfile.findFirst({
       where: { email: email.toLowerCase() },
     });
     if (existing)
@@ -85,19 +83,35 @@ router.post("/", ensureAdmin, async (req, res) => {
         .json({ ok: false, message: "Email already in use" });
 
     const passwordHash = await bcrypt.hash(String(password), 10);
-
-    // 👇 generate required sub
     const sub = randomUUID();
 
-    const created = await (prisma as any).userProfile.create({
+    // Map lowercase to Role enum
+    const prismaRole: Role =
+      roleNorm === "admin"
+        ? Role.ADMIN
+        : roleNorm === "manager"
+        ? Role.MANAGER
+        : Role.VIEWER;
+
+    const tenantId =
+      process.env.DEFAULT_TENANT_ID && process.env.DEFAULT_TENANT_ID.trim()
+        ? process.env.DEFAULT_TENANT_ID.trim()
+        : undefined;
+
+    if (!tenantId) {
+      return res
+        .status(400)
+        .json({ ok: false, message: "DEFAULT_TENANT_ID is missing" });
+    }
+
+    const created = await prisma.userProfile.create({
       data: {
         sub,
         email: email.toLowerCase(),
-        name: name || null,
-        role: roleNorm,
-        isActive: true,
+        name: name || "",
+        role: prismaRole,
         passwordHash,
-        tenantId: process.env.DEFAULT_TENANT_ID || null,
+        tenantId,
       },
     });
 
@@ -116,17 +130,23 @@ router.post("/", ensureAdmin, async (req, res) => {
 router.patch("/:id", ensureAdmin, async (req, res) => {
   try {
     const id = String(req.params.id);
-    const { role, isActive, password } = req.body || {};
+    const { role, password, name } = req.body || {};
     const data: any = {};
+
+    if (name !== undefined) data.name = name;
 
     if (role !== undefined) {
       const roleNorm = String(role).toLowerCase();
-      if (!["admin", "staff"].includes(roleNorm)) {
+      if (!["admin", "manager", "viewer"].includes(roleNorm)) {
         return res.status(400).json({ ok: false, message: "invalid role" });
       }
-      data.role = roleNorm;
+      data.role =
+        roleNorm === "admin"
+          ? Role.ADMIN
+          : roleNorm === "manager"
+          ? Role.MANAGER
+          : Role.VIEWER;
     }
-    if (typeof isActive === "boolean") data.isActive = !!isActive;
 
     if (password !== undefined) {
       if (!PASSWORD_RE.test(String(password || ""))) {
@@ -137,10 +157,11 @@ router.patch("/:id", ensureAdmin, async (req, res) => {
       data.passwordHash = await bcrypt.hash(String(password), 10);
     }
 
-    const updated = await (prisma as any).userProfile.update({
+    const updated = await prisma.userProfile.update({
       where: { id },
       data,
     });
+
     res.json(normalizeUser(updated));
   } catch (e: any) {
     console.error("user patch failed:", e);
