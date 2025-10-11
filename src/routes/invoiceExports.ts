@@ -881,4 +881,110 @@ router.get("/:idOrNo/pdf", async (req, res) => {
   }
 });
 
+/* -------------------------------------------------------------------------- */
+/*                        Combined PDF Export (POST)                          */
+/* -------------------------------------------------------------------------- */
+router.post("/export.pdf", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const filters = body.filters || {};
+    const ids: string[] = Array.isArray(body.invoiceIds) ? body.invoiceIds : [];
+
+    // 🔍 Build Prisma filter
+    const where: any = buildWhere({
+      q: filters.q,
+      clientId: filters.billToId,
+      billToId: filters.billToId,
+      dateFrom: filters.dateFrom,
+      dateTo: filters.dateTo,
+      status: filters.status,
+      ids,
+    });
+
+    // 🧾 Fetch invoices that match filters or selected IDs
+    const invoices = await prisma.invoice.findMany({
+      where,
+      include: { client: true as any },
+      orderBy: [{ issueDate: "desc" }, { createdAt: "desc" }],
+    });
+
+    if (!invoices.length) {
+      return res.status(404).json({ error: "No invoices match filters or selection" });
+    }
+
+    // ⚙️ Generate each PDF individually
+    const buffers: Buffer[] = [];
+    for (const rawInv of invoices) {
+      const inv: any = rawInv; // 👈 Cast to any to avoid TS property errors
+
+      let items: any[] = Array.isArray(inv.items) ? inv.items : [];
+      if (!items.length) {
+        const m = await fetchItemsMap([inv.id]);
+        items = m.get(inv.id) || inlineItems(inv);
+      }
+
+      const normItems = items.map((it: any, i: number) => ({
+        sNo: i + 1,
+        details: it.details || it,
+        lineTotal: String(
+          it.lineTotal ??
+            it.total ??
+            it.amount ??
+            (Number(it.qty ?? it.quantity ?? 1) *
+              Number(it.unitPrice ?? it.price ?? it.rate ?? 0) -
+              Number(it.discount ?? 0))
+        ),
+      }));
+
+      const invForPdf = {
+        invoiceNo: inv.invoiceNo,
+        issueDate: inv.issueDate,
+        dueDate: inv.dueDate ?? null,
+        currency: inv.currency ?? "INR",
+        baseCurrency: inv.baseCurrency,
+        status: inv.status,
+        serviceType: inv.serviceType ?? "OTHER",
+        subtotal: String(inv.subtotal ?? 0),
+        taxTotal: String(inv.taxAmt ?? inv.taxTotal ?? 0),
+        serviceCharges: String(inv.svcAmt ?? inv.serviceCharges ?? 0),
+        grandTotal: String(inv.total ?? inv.grandTotal ?? 0),
+        notes: inv.notes ?? null,
+        bankJson: inv.bankJson ?? inv.bank ?? null,
+        meta: inv.meta ?? null,
+        client: inv.client ?? { name: inv.billToName || "" },
+        items: normItems,
+      };
+
+      const docDef = isProforma(invForPdf as any)
+        ? buildProformaDocDef(invForPdf as any)
+        : buildInvoiceDocDef(invForPdf as any);
+
+      const pdf = await renderPdfBuffer(docDef);
+      buffers.push(pdf);
+    }
+
+    // 🧩 Merge all PDFs using pdf-lib
+    const merged = await PDFDocument.create();
+    for (const buf of buffers) {
+      const src = await PDFDocument.load(buf);
+      const copiedPages = await merged.copyPages(src, src.getPageIndices());
+      copiedPages.forEach((p) => merged.addPage(p));
+    }
+
+    const finalBytes = await merged.save();
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="PlumTrips-Invoices.pdf"`
+    );
+    res.end(Buffer.from(finalBytes));
+  } catch (e: any) {
+    console.error("Combined PDF export failed:", e);
+    res.status(500).json({ error: e.message || "Combined PDF export failed" });
+  }
+});
+
+
+
 export default router;
